@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Test / lint caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Build artefacts
+dist/
+build/
+*.egg-info/
+
+# Virtual envs
+.venv/
+.pixi/
+
+# Project outputs
+outputs/
+logs/
+
+# Large assets (tracked via Git LFS or excluded entirely)
+assets/*.usd
+tests/fixtures/*.ply
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

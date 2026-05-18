@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "isaac-auto-scene"
+version = "0.1.0"
+description = "Capture a D435 RGB-D frame, segment + register the SO-101 arm point cloud via FPFH+FGR→GICP, and emit an Isaac Sim USD scene mirroring the real setup."
+requires-python = ">=3.11,<3.12"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Koen van Gorkom", email = "kvgorkom@smart-robotics.nl" }]
+
+[project.scripts]
+isaac-auto-scene = "isaac_auto_scene.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/isaac_auto_scene"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+disallow_untyped_defs = true
+warn_unused_ignores = true
+warn_return_any = true
+no_implicit_reexport = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers"
+markers = [
+    "hardware: requires hardware (skipped unless --run-hardware)",
+]

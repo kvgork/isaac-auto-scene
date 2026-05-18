@@ -1,0 +1,55 @@
+[workspace]
+name = "isaac-auto-scene"
+version = "0.1.0"
+channels = ["conda-forge", "nvidia"]
+platforms = ["linux-64"]
+
+[dependencies]
+python = "3.11.*"
+pip = "*"
+
+[pypi-dependencies]
+isaac-auto-scene = { path = ".", editable = true }
+
+[feature.dev.dependencies]
+pytest = "*"
+ruff = "*"
+mypy = "*"
+pre-commit = "*"
+hatchling = "*"
+
+[feature.geometry.pypi-dependencies]
+open3d = "*"
+numpy = "*"
+scipy = "*"
+trimesh = "*"
+yourdfpy = "*"
+pyransac3d = "*"
+
+[feature.realsense.pypi-dependencies]
+pyrealsense2 = "*"
+
+# Isaac Sim 5.1 cannot be installed via pixi's conda/pypi resolver because
+# NVIDIA's custom PyPI index (https://pypi.nvidia.com) is not supported as a
+# per-dependency index in pixi's current resolver.  Use `pixi run install-isaac`
+# which invokes scripts/install_isaac.sh to pip-install into the active env.
+[feature.isaac]
+# TODO: add isaacsim + isaaclab here once pixi supports per-package PyPI indexes
+# For now, install via: pixi run install-isaac
+
+[feature.ros2]
+# TODO: add ROS2 dependencies here (Phase 6)
+
+[environments]
+default = ["dev", "geometry"]
+sim = ["dev", "geometry", "isaac"]
+hardware = ["dev", "geometry", "realsense"]
+full = ["dev", "geometry", "isaac", "realsense"]
+
+[tasks]
+test = "pytest -q"
+test-hw = "pytest -q --run-hardware"
+lint = "ruff check src tests"
+fmt = "ruff format src tests"
+typecheck = "mypy src"
+install-isaac = "bash scripts/install_isaac.sh"
