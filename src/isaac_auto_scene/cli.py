@@ -91,6 +91,26 @@ def cmd_generate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _detect_ros_distro() -> str:
+    """Pick the bundled Isaac Sim ROS2 distro by Ubuntu major version.
+
+    Ubuntu 22.x -> humble, Ubuntu 24.x -> jazzy.  Defaults to jazzy.
+    """
+    try:
+        with open("/etc/os-release") as f:
+            for line in f:
+                if line.startswith("VERSION_ID="):
+                    ver = line.split("=", 1)[1].strip().strip('"')
+                    major = ver.split(".")[0]
+                    if major == "22":
+                        return "humble"
+                    if major == "24":
+                        return "jazzy"
+    except OSError:
+        pass
+    return "jazzy"
+
+
 def cmd_render(args: argparse.Namespace) -> int:  # pragma: no cover - external Isaac Sim env
     """calib.json -> PNG frame via the lerobot-isaac-training Isaac Sim env.
 
@@ -127,6 +147,27 @@ def cmd_render(args: argparse.Namespace) -> int:  # pragma: no cover - external 
         src_path + os.pathsep + env["PYTHONPATH"] if "PYTHONPATH" in env else src_path
     )
 
+    if args.ros2:
+        # Isaac Sim's ROS2 bridge needs LD_LIBRARY_PATH + ROS_DISTRO +
+        # RMW_IMPLEMENTATION pointing at the bundled jazzy/humble libs.
+        # Detect distro by Ubuntu major version.
+        ros_distro = _detect_ros_distro()
+        isaacsim_root = Path(isaac_python).parent.parent / (
+            "lib/python3.12/site-packages/isaacsim/exts/isaacsim.ros2.core"
+        )
+        ros_lib_dir = isaacsim_root / ros_distro / "lib"
+        if not ros_lib_dir.exists():
+            print(
+                f"ERROR: bundled ROS2 libs not found at {ros_lib_dir}",
+                file=sys.stderr,
+            )
+            return 1
+        env["ROS_DISTRO"] = ros_distro
+        env["RMW_IMPLEMENTATION"] = "rmw_fastrtps_cpp"
+        env["LD_LIBRARY_PATH"] = str(ros_lib_dir) + os.pathsep + env.get(
+            "LD_LIBRARY_PATH", ""
+        )
+
     cmd = [
         isaac_python,
         str(render_script),
@@ -135,6 +176,8 @@ def cmd_render(args: argparse.Namespace) -> int:  # pragma: no cover - external 
         "--headless",
         "--enable_cameras",
     ]
+    if args.ros2:
+        cmd += ["--ros2", "--ros2-frames", str(args.ros2_frames)]
     print("$", " ".join(cmd))
     try:
         proc = subprocess.run(cmd, env=env, check=False)
@@ -205,6 +248,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Path to the Isaac Sim Python interpreter (default: "
         "~/workspaces/lerobot-isaac-training/.pixi/envs/sim/bin/python)",
+    )
+    pr.add_argument(
+        "--ros2",
+        action="store_true",
+        help="attach the ROS2 OmniGraph publisher (D10)",
+    )
+    pr.add_argument(
+        "--ros2-frames",
+        type=int,
+        default=60,
+        help="extra sim steps after warm-up so the ROS2 publisher can push "
+        "frames out (default 60 = ~1 s @ 60 Hz)",
     )
     pr.set_defaults(func=cmd_render)
 

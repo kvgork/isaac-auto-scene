@@ -24,6 +24,42 @@ ISAAC_PY = Path.home() / "workspaces/lerobot-isaac-training/.pixi/envs/sim/bin/p
     not ISAAC_PY.exists(),
     reason=f"Isaac Sim Python not found at {ISAAC_PY}",
 )
+def test_render_with_ros2_bridge(tmp_path: Path) -> None:
+    """Smoke: --ros2 flag attaches the publisher graph and render still succeeds."""
+    urdf = write_minimal_urdf(tmp_path)
+    calib_path = tmp_path / "calib.json"
+    frame_path = tmp_path / "frame.png"
+
+    rc = main(
+        [
+            "calibrate",
+            "--urdf", str(urdf),
+            "--mock",
+            "--frames", "5",
+            "--target-n-points", "3000",
+            "--restarts", "2",
+            "--out", str(calib_path),
+        ]
+    )
+    assert rc in (0, 2)
+    rc = main(
+        [
+            "render",
+            "--calib", str(calib_path),
+            "--out", str(frame_path),
+            "--ros2",
+            "--ros2-frames", "10",
+        ]
+    )
+    assert rc == 0
+    assert frame_path.exists() and frame_path.stat().st_size > 1000
+
+
+@pytest.mark.hardware
+@pytest.mark.skipif(
+    not ISAAC_PY.exists(),
+    reason=f"Isaac Sim Python not found at {ISAAC_PY}",
+)
 def test_render_produces_png(tmp_path: Path) -> None:
     urdf = write_minimal_urdf(tmp_path)
     calib_path = tmp_path / "calib.json"

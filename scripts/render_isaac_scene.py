@@ -30,6 +30,18 @@ def main() -> int:
     parser.add_argument("--warmup", type=int, default=30)
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
+    parser.add_argument(
+        "--ros2",
+        action="store_true",
+        help="attach the ROS2 OmniGraph camera publisher (D10)",
+    )
+    parser.add_argument(
+        "--ros2-frames",
+        type=int,
+        default=0,
+        help="extra simulation steps after warm-up so the ROS2 publisher has "
+        "time to push frames out (default 0 = single-shot render only)",
+    )
 
     # Inject Isaac Lab AppLauncher CLI args
     from isaaclab.app import AppLauncher  # type: ignore
@@ -49,6 +61,15 @@ def main() -> int:
     from PIL import Image  # noqa: E402
 
     import isaaclab.sim as sim_utils  # noqa: E402
+
+    if args.ros2:
+        # Load ROS2 bridge extensions BEFORE any further graph activity so
+        # node type IDs resolve when ros2_bridge.attach_ros2_camera_publisher
+        # is called.  set_extension_enabled_immediate is synchronous.
+        import omni.kit.app  # noqa: E402
+        ext_mgr = omni.kit.app.get_app().get_extension_manager()
+        for ext_name in ("isaacsim.core.nodes", "isaacsim.ros2.bridge"):
+            ext_mgr.set_extension_enabled_immediate(ext_name, True)
 
     from isaac_auto_scene.calibrate import load_calibration  # noqa: E402
     from isaac_auto_scene.scene_gen import build_isaac_scene, build_scene_spec  # noqa: E402
@@ -72,12 +93,25 @@ def main() -> int:
     target = torch.tensor([[0.0, 0.0, 0.0]], dtype=torch.float32)
     camera.set_world_poses_from_view(cam_view_pos, target)
 
+    if args.ros2:
+        from isaac_auto_scene.ros2_bridge import (  # noqa: E402
+            ROS2BridgeCfg,
+            attach_ros2_camera_publisher,
+        )
+        bridge_cfg = ROS2BridgeCfg(camera_prim_path="/World/D435")
+        attach_ros2_camera_publisher(bridge_cfg)
+        print(f"ROS2 bridge attached at {bridge_cfg.graph_path}", flush=True)
+
     for _ in range(args.warmup):
         sim.step()
         camera.update(dt=sim.get_physics_dt())
 
     sim.step()
     camera.update(dt=sim.get_physics_dt())
+
+    for _ in range(args.ros2_frames):
+        sim.step()
+        camera.update(dt=sim.get_physics_dt())
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
