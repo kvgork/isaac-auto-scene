@@ -27,6 +27,23 @@ Stable replacement: **`o3d.t.pipelines.registration.icp` (tensor API)**. We
 use this for all ICP in `register.py` and run several random-rotation
 restarts in lieu of FGR/RANSAC for the global init.
 
+## Isaac Sim integration
+Isaac Sim 6.0 + Isaac Lab 0.54.3 are **borrowed** from
+`~/workspaces/lerobot-isaac-training/.pixi/envs/sim` rather than installed
+into this workspace (plan §5 locks 5.1 / v2.3.2 but local install is 6.0;
+diverged decision recorded here, not in plan).
+
+- `scripts/render_isaac_scene.py` is invoked with the lerobot env Python.
+- `isaac-auto-scene render` does the subprocess hand-off (override path
+  via `--isaac-python` or `ISAAC_PYTHON` env var).
+- `simulation_app.close()` deadlocks on this build — render script calls
+  `os._exit(0)` after writing the PNG.
+- `PreviewSurfaceCfg` is incompatible with Isaac Sim 6.0's
+  `CreateShaderPrimFromSdrCommand` (raises `TypeError` on `name` kwarg);
+  spawn cuboids without `visual_material`.
+- `Camera.set_world_poses_from_view` must be called **after** `sim.reset()`
+  — earlier and `_ALL_INDICES` is unset.
+
 ## Convention reminders (from the plan)
 - Quaternions: **XYZW** order (Isaac Lab + SciPy default).
 - Joint config: SO-101 midpoint-zero (URDF source
