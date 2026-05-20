@@ -91,14 +91,63 @@ def cmd_generate(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_render(args: argparse.Namespace) -> int:  # pragma: no cover - hardware-only
-    """scene.usd -> PNG frames.  Requires Isaac Sim."""
-    print(
-        "render requires Isaac Sim; install via `pixi run install-isaac` and use "
-        "the `sim` environment.",
-        file=sys.stderr,
+def cmd_render(args: argparse.Namespace) -> int:  # pragma: no cover - external Isaac Sim env
+    """calib.json -> PNG frame via the lerobot-isaac-training Isaac Sim env.
+
+    Delegates to ``scripts/render_isaac_scene.py`` using the Isaac Sim Python
+    interpreter from ``~/workspaces/lerobot-isaac-training/.pixi/envs/sim``.
+    Set ``--isaac-python`` to override.
+    """
+    import os
+    import shutil
+    import subprocess
+
+    isaac_python = (
+        args.isaac_python
+        or os.environ.get("ISAAC_PYTHON")
+        or str(
+            Path.home()
+            / "workspaces/lerobot-isaac-training/.pixi/envs/sim/bin/python"
+        )
     )
-    return 3
+    if not Path(isaac_python).exists():
+        print(
+            f"ERROR: Isaac Sim Python not found at {isaac_python}.  "
+            "Override with --isaac-python or set ISAAC_PYTHON.",
+            file=sys.stderr,
+        )
+        return 1
+
+    repo_root = Path(__file__).resolve().parents[2]
+    render_script = repo_root / "scripts" / "render_isaac_scene.py"
+
+    env = os.environ.copy()
+    src_path = str(repo_root / "src")
+    env["PYTHONPATH"] = (
+        src_path + os.pathsep + env["PYTHONPATH"] if "PYTHONPATH" in env else src_path
+    )
+
+    cmd = [
+        isaac_python,
+        str(render_script),
+        "--calib", str(args.calib),
+        "--out", str(args.out),
+        "--headless",
+        "--enable_cameras",
+    ]
+    print("$", " ".join(cmd))
+    try:
+        proc = subprocess.run(cmd, env=env, check=False)
+    except FileNotFoundError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    if proc.returncode != 0:
+        return proc.returncode
+    if not Path(args.out).exists() or Path(args.out).stat().st_size == 0:
+        print(f"ERROR: render produced empty output {args.out}", file=sys.stderr)
+        return 1
+    print(f"render ok -> {args.out}")
+    return 0
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
@@ -148,9 +197,15 @@ def build_parser() -> argparse.ArgumentParser:
     pg.add_argument("--ros2", action="store_true", help="attach ROS2 publisher OmniGraph")
     pg.set_defaults(func=cmd_generate)
 
-    pr = sub.add_parser("render", help="scene.usd -> PNG frames (Isaac Sim)")
-    pr.add_argument("--scene", required=True)
+    pr = sub.add_parser("render", help="calib.json -> PNG via Isaac Sim env")
+    pr.add_argument("--calib", required=True)
     pr.add_argument("--out", required=True)
+    pr.add_argument(
+        "--isaac-python",
+        default=None,
+        help="Path to the Isaac Sim Python interpreter (default: "
+        "~/workspaces/lerobot-isaac-training/.pixi/envs/sim/bin/python)",
+    )
     pr.set_defaults(func=cmd_render)
 
     pv = sub.add_parser("validate", help="forward-projection residual report")

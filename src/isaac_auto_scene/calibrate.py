@@ -13,13 +13,14 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
-import open3d as o3d
 
-from isaac_auto_scene.capture import CaptureResult
-from isaac_auto_scene.cad import CADResult
-from isaac_auto_scene.register import RegistrationResult
+if TYPE_CHECKING:  # heavy modules — only needed for type hints
+    from isaac_auto_scene.capture import CaptureResult
+    from isaac_auto_scene.cad import CADResult
+    from isaac_auto_scene.register import RegistrationResult
 
 
 @dataclass(frozen=True)
@@ -87,9 +88,9 @@ def _rot_to_quat_xyzw(R: np.ndarray) -> np.ndarray:
 
 
 def build_calibration(
-    capture_result: CaptureResult,
-    cad_result: CADResult,
-    register_result: RegistrationResult,
+    capture_result: "CaptureResult",
+    cad_result: "CADResult",
+    register_result: "RegistrationResult",
 ) -> CalibrationOutput:
     """Assemble a CalibrationOutput from the three pipeline stages.
 

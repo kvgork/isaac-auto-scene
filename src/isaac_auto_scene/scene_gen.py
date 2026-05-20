@@ -192,25 +192,46 @@ def Xform "World"
     return out_path
 
 
-def build_isaac_scene(spec: SceneSpec) -> Any:
-    """Build an Isaac Lab InteractiveSceneCfg from ``spec``.
+def build_isaac_scene(spec: SceneSpec) -> dict[str, Any]:  # pragma: no cover - external sim env
+    """Spawn the scene prims into an already-booted Isaac Sim app.
 
-    Lazy-imports ``isaaclab`` so callers without Isaac Sim installed can
-    still use :func:`build_scene_spec` and :func:`write_usd_stub`.
+    **Precondition:** ``isaaclab.app.AppLauncher`` MUST have been booted with
+    ``headless=True, enable_cameras=True`` before calling this — the
+    ``isaacsim`` / ``omni`` runtime is only importable post-boot.
+
+    Spawns:
+      - ``/World/Table`` — CuboidCfg using ``spec.table_size_m``
+      - ``/World/DomeLight`` — DomeLightCfg at default intensity
+      - ``/World/D435`` — Camera at ``spec.camera_position_m`` /
+        ``spec.camera_quat_xyzw`` with ``spec.pinhole_cfg`` intrinsics
+
+    Returns a dict ``{"camera": Camera}`` so the caller can ``camera.update()``
+    after each ``sim.step()``.
     """
-    try:
-        from isaaclab.scene import InteractiveSceneCfg
-        from isaaclab.sim import CuboidCfg, DomeLightCfg, PinholeCameraCfg
-    except ImportError as exc:  # pragma: no cover - hardware-only
-        raise RuntimeError(
-            "Isaac Lab not installed.  Use `pixi run install-isaac` or "
-            "the `sim` / `full` environment."
-        ) from exc
+    import isaaclab.sim as sim_utils
+    from isaaclab.sensors.camera import Camera, CameraCfg
 
-    raise NotImplementedError(  # pragma: no cover - implemented in hardware env
-        "build_isaac_scene is a stub until Isaac Lab v2.3.2 is on the test runner; "
-        "use write_usd_stub for CI."
+    table_cfg = sim_utils.CuboidCfg(size=spec.table_size_m)
+    table_cfg.func("/World/Table", table_cfg, translation=(0.0, 0.0, -spec.table_size_m[2] / 2))
+
+    light_cfg = sim_utils.DomeLightCfg(intensity=1500.0, color=(1.0, 1.0, 1.0))
+    light_cfg.func("/World/DomeLight", light_cfg)
+
+    camera_cfg = CameraCfg(
+        prim_path="/World/D435",
+        update_period=0,
+        height=int(spec.pinhole_cfg["height"]),
+        width=int(spec.pinhole_cfg["width"]),
+        data_types=["rgb"],
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=float(spec.pinhole_cfg["focal_length"]),
+            horizontal_aperture=float(spec.pinhole_cfg["horizontal_aperture"]),
+            horizontal_aperture_offset=float(spec.pinhole_cfg["horizontal_aperture_offset"]),
+            clipping_range=(0.05, 10.0),
+        ),
     )
+    camera = Camera(cfg=camera_cfg)
+    return {"camera": camera}
 
 
 def warm_up_render(render_step: Callable[[], None], n_frames: int = WARM_UP_FRAMES) -> None:
