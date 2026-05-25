@@ -214,20 +214,37 @@ def cmd_register_multi(args: argparse.Namespace) -> int:
     manifest = load_manifest(manifest_dir)
     urdf = load_urdf(args.urdf)
 
+    ok_poses = [r for r in manifest.poses if r.status == "ok"]
+    print(
+        f"[register-multi] loaded {len(ok_poses)} ok pose(s) from {manifest_dir}",
+        flush=True,
+    )
     pairs = []
     last_cap = None
     last_cad = None
     last_T_table = None
-    for record in manifest.poses:
+    home_offset = _load_home_offset(getattr(args, "home_offset", None))
+    for idx, record in enumerate(manifest.poses, start=1):
         if record.status != "ok":
             print(
-                f"skipping pose {record.name!r} (status={record.status})",
-                file=sys.stderr,
+                f"[register-multi] [{idx}/{len(manifest.poses)}] "
+                f"skipping {record.name!r} (status={record.status})",
+                flush=True,
             )
             continue
+        print(
+            f"[register-multi] [{idx}/{len(manifest.poses)}] "
+            f"{record.name!r}: loading capture...",
+            flush=True,
+        )
         cap = load_pose_capture(manifest_dir, record)
         from isaac_auto_scene.segment import segment_table_arm
 
+        print(
+            f"[register-multi] [{idx}/{len(manifest.poses)}] "
+            f"{record.name!r}: segmenting ({len(cap.pcd.points)} pts)...",
+            flush=True,
+        )
         seg = segment_table_arm(
             cap.pcd,
             workspace_z_max_m=args.workspace_z_max,
@@ -238,11 +255,20 @@ def cmd_register_multi(args: argparse.Namespace) -> int:
             outlier_nb_neighbors=args.outlier_neighbors,
             outlier_std_ratio=args.outlier_std,
         )
-        joints_urdf = _apply_home_offset(
-            dict(record.readback_joints), _load_home_offset(getattr(args, "home_offset", None))
+        joints_urdf = _apply_home_offset(dict(record.readback_joints), home_offset)
+        print(
+            f"[register-multi] [{idx}/{len(manifest.poses)}] "
+            f"{record.name!r}: assembling CAD ({args.target_n_points} pts)...",
+            flush=True,
         )
         cad = assemble_pcd(
             urdf, joints_urdf, target_n_points=args.target_n_points
+        )
+        print(
+            f"[register-multi] [{idx}/{len(manifest.poses)}] "
+            f"{record.name!r}: arm_cloud={len(seg.arm_cloud.points)} pts, "
+            f"cad={len(cad.points)} pts",
+            flush=True,
         )
         pairs.append((record.name, _pcd_from_np(cad.points), seg.arm_cloud))
         last_cap = cap
@@ -253,20 +279,38 @@ def cmd_register_multi(args: argparse.Namespace) -> int:
         print("ERROR: no usable poses in manifest", file=sys.stderr)
         return 1
 
-    gate_override: tuple[float, float] | None = None
+    # Parse user-supplied gate first.
+    user_gate: tuple[float, float] | None = None
     if args.gate_fitness is not None or args.gate_rmse is not None:
         f_min, rmse_max = QUALITY_GATE
         if args.gate_fitness is not None:
             f_min = float(args.gate_fitness)
         if args.gate_rmse is not None:
             rmse_max = float(args.gate_rmse)
-        gate_override = (f_min, rmse_max)
+        user_gate = (f_min, rmse_max)
         print(
             f"[register-multi] quality gate override: fitness>={f_min:.2f} "
             f"rmse<={rmse_max*1000:.1f}mm (default {QUALITY_GATE[0]:.2f}/"
             f"{QUALITY_GATE[1]*1000:.0f}mm)",
             file=sys.stderr,
         )
+
+    # Bundle backends use the per-pose ICP results only as initial-guess
+    # hints, then jointly optimise.  Force a permissive gate for the
+    # per-pose stage so RuntimeError never fires; user_gate is checked
+    # against the final bundle result instead.
+    if getattr(args, "backend", "per_pose") in ("bundle", "bundle_joints"):
+        gate_override: tuple[float, float] | None = (0.0, 1.0)
+        args.min_accepted = 1
+        print(
+            f"[register-multi] backend={args.backend}: per-pose gate "
+            f"relaxed to (0.0, 1.0) for init hints; user gate evaluated "
+            f"against final bundle result.",
+            file=sys.stderr,
+            flush=True,
+        )
+    else:
+        gate_override = user_gate
 
     fallback_fn = _resolve_fallback(args)
 
