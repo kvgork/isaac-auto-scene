@@ -234,6 +234,66 @@ def cmd_register_multi(args: argparse.Namespace) -> int:
         fallback=fallback_fn,
     )
 
+    if getattr(args, "backend", "per_pose") == "bundle":
+        # Bundle-refine using the *best per-pose* ICP result as init.
+        # The averaged T from register_multi_pose is biased by cylindrical-
+        # symmetry ambiguity (each per-pose solve lands in a different basin
+        # and the average is meaningless).  The single highest-fitness pose
+        # is closer to the true T.
+        from isaac_auto_scene.bundle_register import register_bundle
+
+        if multi.per_pose:
+            best_pp = max(multi.per_pose, key=lambda p: p.fitness)
+            T_init = np.asarray(best_pp.T, dtype=np.float64)
+            print(
+                f"[register-multi] bundle init: pose={best_pp.pose_name!r} "
+                f"fitness={best_pp.fitness:.3f}",
+                file=sys.stderr,
+            )
+        else:
+            T_init = multi.T
+
+        cad_arrays = [np.asarray(p[1].points, dtype=np.float64) for p in pairs]
+        arm_clouds = [p[2] for p in pairs]
+        bundle = register_bundle(
+            cad_arrays,
+            arm_clouds,
+            T_init=T_init,
+            inlier_distance_m=float(args.bundle_inlier_distance),
+            max_nfev=int(args.bundle_max_nfev),
+        )
+        # Overwrite multi with bundle output, keep per_pose stats for the
+        # final report.
+        from isaac_auto_scene.register import (
+            MultiPoseResult,
+            PerPoseRegistration,
+        )
+
+        per_pose_records = tuple(
+            PerPoseRegistration(
+                pose_name=p[0],
+                accepted=True,
+                fitness=bundle.per_pose_fitness[i],
+                inlier_rmse_m=bundle.per_pose_rmse_m[i],
+                T=bundle.T.copy(),
+            )
+            for i, p in enumerate(pairs)
+        )
+        multi = MultiPoseResult(
+            T=bundle.T,
+            quat_xyzw=bundle.quat_xyzw,
+            translation_m=bundle.translation_m,
+            dispersion_rad=0.0,
+            n_accepted=len(pairs),
+            n_total=len(pairs),
+            per_pose=per_pose_records,
+        )
+        print(
+            f"[register-multi] bundle solver: cost={bundle.cost:.4f} "
+            f"nfev={bundle.n_iterations}",
+            file=sys.stderr,
+        )
+
     # Reuse build_calibration's quat conversion / intrinsics packaging via
     # a synthetic single-pose RegistrationResult-like object.
     from isaac_auto_scene.register import RegistrationResult
@@ -442,6 +502,9 @@ def cmd_smoke(args: argparse.Namespace) -> int:
         gate_fitness=args.gate_fitness,
         gate_rmse=args.gate_rmse,
         fallback=args.fallback,
+        backend=args.backend,
+        bundle_inlier_distance=args.bundle_inlier_distance,
+        bundle_max_nfev=args.bundle_max_nfev,
     )
     try:
         rc = cmd_register_multi(reg_args)
@@ -636,6 +699,31 @@ def build_parser() -> argparse.ArgumentParser:
         "Open3D FPFH features + custom RANSAC Procrustes (Kabsch SVD) — "
         "no extra deps, robust to partial overlap + clutter.",
     )
+    prm.add_argument(
+        "--backend",
+        default="per_pose",
+        choices=["per_pose", "bundle"],
+        help="Aggregation backend. 'per_pose' = independent ICP + weighted "
+        "average (default, fast). 'bundle' = single SE(3) jointly optimised "
+        "across all poses via se(3) Levenberg-Marquardt (breaks cylindrical-"
+        "symmetry ambiguity that defeats per-pose averaging).",
+    )
+    prm.add_argument(
+        "--bundle-inlier-distance",
+        type=float,
+        default=0.02,
+        help="Bundle residual clamp distance (m).  CAD points whose nearest "
+        "real-arm neighbour exceeds this are still counted with the clamp "
+        "value, robustifying against the missing-back-half-of-arm failure "
+        "mode.",
+    )
+    prm.add_argument(
+        "--bundle-max-nfev",
+        type=int,
+        default=200,
+        help="scipy.optimize.least_squares max function-eval budget for "
+        "the bundle solver.",
+    )
     prm.set_defaults(func=cmd_register_multi)
 
     pg = sub.add_parser("generate", help="calib.json -> scene.usd")
@@ -751,6 +839,14 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["none", "fpfh_ransac"],
         help="Robust registration backend (default none).",
     )
+    ps.add_argument(
+        "--backend",
+        default="per_pose",
+        choices=["per_pose", "bundle"],
+        help="Multi-pose aggregation backend.",
+    )
+    ps.add_argument("--bundle-inlier-distance", type=float, default=0.02)
+    ps.add_argument("--bundle-max-nfev", type=int, default=200)
     ps.set_defaults(func=cmd_smoke)
 
     return p
