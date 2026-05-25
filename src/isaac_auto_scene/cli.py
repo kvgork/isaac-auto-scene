@@ -174,6 +174,8 @@ def cmd_register_multi(args: argparse.Namespace) -> int:
             expected_up=_parse_expected_up(args.expected_up),
             up_tolerance_deg=args.up_tol_deg,
             arm_merge_radius_m=args.arm_merge_radius,
+            outlier_nb_neighbors=args.outlier_neighbors,
+            outlier_std_ratio=args.outlier_std,
         )
         cad = assemble_pcd(
             urdf, record.readback_joints, target_n_points=args.target_n_points
@@ -396,6 +398,8 @@ def cmd_smoke(args: argparse.Namespace) -> int:
         expected_up=args.expected_up,
         up_tol_deg=args.up_tol_deg,
         arm_merge_radius=args.arm_merge_radius,
+        outlier_neighbors=args.outlier_neighbors,
+        outlier_std=args.outlier_std,
     )
     try:
         rc = cmd_register_multi(reg_args)
@@ -553,6 +557,20 @@ def build_parser() -> argparse.ArgumentParser:
         "into the arm cloud. Use ~0.30 for SO-101 to capture base + "
         "forearm when joints split them across clusters. Default 0 = off.",
     )
+    prm.add_argument(
+        "--outlier-neighbors",
+        type=int,
+        default=0,
+        help="When > 0, run Open3D statistical outlier removal on the arm "
+        "cloud with this neighbour count (drops cable / mount stragglers). "
+        "Typical: 20.  Default 0 = off.",
+    )
+    prm.add_argument(
+        "--outlier-std",
+        type=float,
+        default=2.0,
+        help="Std-dev multiplier for outlier filter (lower = more aggressive).",
+    )
     prm.set_defaults(func=cmd_register_multi)
 
     pg = sub.add_parser("generate", help="calib.json -> scene.usd")
@@ -637,6 +655,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="Merge DBSCAN clusters within this radius (m) of the largest "
         "into the arm cloud (0 = off).",
+    )
+    ps.add_argument(
+        "--outlier-neighbors",
+        type=int,
+        default=0,
+        help="Statistical outlier removal neighbour count (0 = off).",
+    )
+    ps.add_argument(
+        "--outlier-std",
+        type=float,
+        default=2.0,
+        help="Std-dev multiplier for outlier filter.",
     )
     ps.set_defaults(func=cmd_smoke)
 

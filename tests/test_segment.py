@@ -152,6 +152,26 @@ def test_arm_merge_radius_unions_nearby_clusters() -> None:
     assert 2600 < n < 3000, f"expected arm_a + arm_b ~2700 points; got {n}"
 
 
+def test_outlier_removal_drops_sparse_points() -> None:
+    """outlier_nb_neighbors > 0 drops far stragglers from the arm cloud."""
+    import open3d as o3d
+
+    rng = np.random.default_rng(4)
+    table = rng.uniform(low=[-0.3, -0.3, 0.499], high=[0.3, 0.3, 0.501], size=(2000, 3))
+    arm = _dense_arm_cluster(rng, np.array([0.0, 0.0, 0.55]), n=2000)
+    # 200 sparse stragglers extending the cloud well beyond its core.
+    stragglers = rng.uniform(low=[-0.20, -0.20, 0.65], high=[0.20, 0.20, 0.85], size=(200, 3))
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(np.vstack([table, arm, stragglers]))
+
+    raw = segment_table_arm(pcd, arm_merge_radius_m=0.50)
+    clean = segment_table_arm(pcd, arm_merge_radius_m=0.50, outlier_nb_neighbors=20, outlier_std_ratio=1.5)
+    assert len(clean.arm_cloud.points) < len(raw.arm_cloud.points), (
+        f"outlier removal should drop points: raw={len(raw.arm_cloud.points)} "
+        f"clean={len(clean.arm_cloud.points)}"
+    )
+
+
 def test_expected_up_raises_when_no_aligned_plane() -> None:
     """Raises if no plane within tolerance is found within the attempt budget."""
     import open3d as o3d

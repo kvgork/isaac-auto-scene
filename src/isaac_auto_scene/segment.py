@@ -68,6 +68,8 @@ def segment_table_arm(
     up_tolerance_deg: float = 30.0,
     max_plane_attempts: int = 5,
     arm_merge_radius_m: float = 0.0,
+    outlier_nb_neighbors: int = 0,
+    outlier_std_ratio: float = 2.0,
 ) -> SegmentResult:
     """Segment the dominant plane and the largest off-plane cluster.
 
@@ -111,6 +113,15 @@ def segment_table_arm(
         separated by a thin servo joint that DBSCAN does not bridge).
         SO-101 reach ≈ 0.30 m, so a default of 0.0 (off) is conservative;
         callers exposing this via the CLI typically pass 0.30.
+    outlier_nb_neighbors:
+        When > 0, run Open3D ``remove_statistical_outlier`` on the final
+        arm cloud with this neighbour count.  Drops sparse outliers — most
+        commonly the cable/mount stragglers that pad the bounding box and
+        push ICP RMSE above the quality gate.  20 is a reasonable starting
+        value for D435 clouds at 640×480.
+    outlier_std_ratio:
+        Standard-deviation multiplier for the outlier filter (lower = more
+        aggressive).  Ignored when ``outlier_nb_neighbors`` is 0.
 
     Returns
     -------
@@ -206,6 +217,12 @@ def segment_table_arm(
                 arm_indices = np.concatenate([arm_indices, idx])
 
     arm_cloud = offplane_cloud.select_by_index(arm_indices.tolist())
+
+    if outlier_nb_neighbors > 0 and len(arm_cloud.points) > outlier_nb_neighbors:
+        arm_cloud, _ = arm_cloud.remove_statistical_outlier(
+            nb_neighbors=int(outlier_nb_neighbors),
+            std_ratio=float(outlier_std_ratio),
+        )
 
     return SegmentResult(
         T_world_table=T,
