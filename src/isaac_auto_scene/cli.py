@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import yaml
 
 from isaac_auto_scene.cad import assemble_pcd, load_urdf
 from isaac_auto_scene.calibrate import (
@@ -95,8 +96,16 @@ def cmd_capture_poses(args: argparse.Namespace) -> int:
             readback_noise_rad=args.servo_noise,
         )
     else:  # pragma: no cover - hardware path
-        raise NotImplementedError(
-            "Hardware arm driver not yet wired; use --mock-arm for now."
+        from isaac_auto_scene.lerobot_arm import (
+            LeRobotSO101Config,
+            LeRobotSO101Driver,
+        )
+
+        driver = LeRobotSO101Driver(
+            config=LeRobotSO101Config(
+                port=args.arm_port,
+                calibrate=args.arm_calibrate,
+            )
         )
 
     if args.mock_cam:
@@ -315,6 +324,77 @@ def cmd_render(args: argparse.Namespace) -> int:  # pragma: no cover - external 
     return 0
 
 
+def cmd_smoke(args: argparse.Namespace) -> int:
+    """End-to-end smoke: capture-poses -> register-multi -> render.
+
+    Hardware path by default (real D435 + SO-101 follower).  ``--mock`` swaps
+    both for the synthetic mock sources so the command is also useful for
+    local pipeline verification without hardware connected.
+
+    The smoke writes a small artifact tree to ``--out``::
+
+        out/
+        ├── captures/                    (one subdir per pose)
+        │   └── manifest.yaml
+        ├── calib.json
+        └── frame.png
+    """
+    out_root = Path(args.out)
+    out_root.mkdir(parents=True, exist_ok=True)
+    captures_dir = out_root / "captures"
+    calib_path = out_root / "calib.json"
+    frame_path = out_root / "frame.png"
+
+    # ---- Stage 1: capture-poses (reuse cmd_capture_poses for parity) ----
+    capture_args = argparse.Namespace(
+        urdf=args.urdf,
+        poses=args.poses,
+        out=str(captures_dir),
+        mock_arm=args.mock,
+        mock_cam=args.mock,
+        seed=args.seed,
+        frames=args.frames,
+        servo_noise=0.0,
+        arm_port=args.arm_port,
+        arm_calibrate=False,
+    )
+    rc = cmd_capture_poses(capture_args)
+    if rc != 0:
+        print(f"[smoke] capture-poses failed (rc={rc})", file=sys.stderr)
+        return rc
+
+    # ---- Stage 2: register-multi (reuse cmd_register_multi) ----
+    reg_args = argparse.Namespace(
+        captures=str(captures_dir),
+        urdf=args.urdf,
+        out=str(calib_path),
+        voxel=0.005,
+        restarts=5,
+        target_n_points=15_000,
+        min_accepted=max(1, len(yaml.safe_load(Path(args.poses).read_text())["poses"]) // 2),
+    )
+    rc = cmd_register_multi(reg_args)
+    if rc not in (0, 2):  # 2 = quality-gate fail; calib.json still written
+        print(f"[smoke] register-multi failed (rc={rc})", file=sys.stderr)
+        return rc
+
+    # ---- Stage 3: render ----
+    render_args = argparse.Namespace(
+        calib=str(calib_path),
+        out=str(frame_path),
+        isaac_python=None,
+        ros2=False,
+        ros2_frames=0,
+    )
+    rc = cmd_render(render_args)
+    if rc != 0:
+        print(f"[smoke] render failed (rc={rc})", file=sys.stderr)
+        return rc
+
+    print(f"[smoke] OK -> {frame_path}")
+    return 0
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
     """Forward-projection residual report from calib.json + scene.usd."""
     calib = load_calibration(args.calib)
@@ -372,6 +452,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="Gaussian readback noise (rad) for MockArmDriver",
     )
+    pcp.add_argument(
+        "--arm-port",
+        default="/dev/ttyACM0",
+        help="serial port for the SO-101 follower (ignored when --mock-arm)",
+    )
+    pcp.add_argument(
+        "--arm-calibrate",
+        action="store_true",
+        help="run LeRobot's interactive calibration prompt on connect",
+    )
     pcp.set_defaults(func=cmd_capture_poses)
 
     prm = sub.add_parser(
@@ -419,6 +509,27 @@ def build_parser() -> argparse.ArgumentParser:
     pv.add_argument("--calib", required=True)
     pv.add_argument("--scene", required=True)
     pv.set_defaults(func=cmd_validate)
+
+    ps = sub.add_parser(
+        "smoke",
+        help="end-to-end: capture-poses -> register-multi -> render",
+    )
+    ps.add_argument("--urdf", required=True, help="path to SO-101 URDF")
+    ps.add_argument("--poses", required=True, help="path to poses.yaml")
+    ps.add_argument("--out", required=True, help="output artifact dir")
+    ps.add_argument(
+        "--mock",
+        action="store_true",
+        help="use MockArmDriver + MockD435Source (no hardware required)",
+    )
+    ps.add_argument("--frames", type=int, default=30)
+    ps.add_argument("--seed", type=int, default=0)
+    ps.add_argument(
+        "--arm-port",
+        default="/dev/ttyACM0",
+        help="serial port for the SO-101 follower (ignored when --mock)",
+    )
+    ps.set_defaults(func=cmd_smoke)
 
     return p
 
