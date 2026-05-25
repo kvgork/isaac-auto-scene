@@ -299,9 +299,211 @@ def _rotation_to_quat_xyzw(R: np.ndarray) -> np.ndarray:
     return q / n if n > 0 else q
 
 
+@dataclass(frozen=True)
+class JointOffsetBundleResult:
+    """Output of a bundle solve that also calibrates per-joint offsets."""
+
+    T: np.ndarray
+    quat_xyzw: np.ndarray
+    translation_m: np.ndarray
+    joint_offsets: dict[str, float]
+    cost: float
+    per_pose_fitness: tuple[float, ...]
+    per_pose_rmse_m: tuple[float, ...]
+    n_iterations: int
+
+
+def register_bundle_with_joints(
+    urdf,
+    joint_angles_per_pose: Sequence[dict[str, float]],
+    arm_clouds: Sequence[o3d.geometry.PointCloud],
+    *,
+    optimize_joints: Sequence[str] | None = None,
+    cad_target_n_points: int = 2000,
+    T_init: np.ndarray | None = None,
+    delta_init: np.ndarray | None = None,
+    inlier_distance_m: float = 0.02,
+    delta_bound_rad: float = 0.35,
+    max_nfev: int = 400,
+    ftol: float = 1e-6,
+    xtol: float = 1e-8,
+) -> JointOffsetBundleResult:
+    """Bundle solve T_cam_arm jointly with a constant per-joint offset Δθ.
+
+    The per-pose CAD is reassembled at every LM evaluation using
+    ``joint_angles_per_pose[p] + Δθ`` so the optimiser can absorb a
+    systematic kinematic offset (LeRobot servo zero vs URDF zero, link-
+    length tolerances, backlash bias) that otherwise compounds along the
+    chain and makes the bundle T fit only near-home poses.
+
+    Parameters
+    ----------
+    urdf:
+        Loaded ``yourdfpy.URDF`` for forward kinematics.
+    joint_angles_per_pose:
+        Per-pose dict of joint_name -> radians (the readback).  All names
+        in ``optimize_joints`` must appear in every dict.
+    arm_clouds:
+        Per-pose segmented arm clouds in camera frame.
+    optimize_joints:
+        Names of joints whose offset is freed.  ``None`` defaults to all
+        actuated joints.
+    cad_target_n_points:
+        Target Poisson-disk samples per pose CAD.  Lower = faster LM.
+    T_init / delta_init:
+        Optional starting points.  Defaults: identity / zeros.
+    inlier_distance_m:
+        Residual clamp (m).  Caps the back-half-of-arm "no NN match" mode.
+    delta_bound_rad:
+        ``±delta_bound_rad`` box constraint per joint offset.  Default
+        0.35 rad (~20°) keeps the optimisation in the linear FK regime.
+    """
+    from scipy.optimize import least_squares
+    from scipy.spatial import cKDTree
+
+    if len(joint_angles_per_pose) != len(arm_clouds):
+        raise ValueError(
+            f"joint_angles_per_pose and arm_clouds must align (got "
+            f"{len(joint_angles_per_pose)} and {len(arm_clouds)})"
+        )
+    if len(arm_clouds) == 0:
+        raise ValueError("register_bundle_with_joints requires >=1 pose")
+
+    if optimize_joints is None:
+        optimize_joints = tuple(urdf.actuated_joint_names)
+    else:
+        optimize_joints = tuple(optimize_joints)
+
+    # Pre-compute link-local CAD samples ONCE (independent of joint state).
+    link_local_pts = _sample_link_local_pcds(urdf, cad_target_n_points)
+
+    # KDTrees for arm clouds (once).
+    arm_trees: list[cKDTree] = []
+    arm_arrs: list[np.ndarray] = []
+    for arm_pcd in arm_clouds:
+        arm_pts = np.asarray(arm_pcd.points, dtype=np.float64)
+        arm_arrs.append(arm_pts)
+        arm_trees.append(cKDTree(arm_pts))
+
+    n_joints = len(optimize_joints)
+    T0 = np.eye(4) if T_init is None else np.asarray(T_init, dtype=np.float64)
+    xi0 = se3_log(T0)
+    delta0 = (
+        np.zeros(n_joints, dtype=np.float64)
+        if delta_init is None
+        else np.asarray(delta_init, dtype=np.float64)
+    )
+    x0 = np.concatenate([xi0, delta0])
+    lb = np.concatenate([-np.full(6, np.inf), -delta_bound_rad * np.ones(n_joints)])
+    ub = np.concatenate([np.full(6, np.inf), delta_bound_rad * np.ones(n_joints)])
+
+    inlier_d = float(inlier_distance_m)
+
+    def residuals(x: np.ndarray) -> np.ndarray:
+        T = se3_exp(x[:6])
+        R = T[:3, :3]
+        t = T[:3, 3]
+        delta = {n: float(x[6 + i]) for i, n in enumerate(optimize_joints)}
+
+        parts = []
+        for p_idx, joints in enumerate(joint_angles_per_pose):
+            applied = {k: float(v) + delta.get(k, 0.0) for k, v in joints.items()}
+            urdf.update_cfg(applied)
+            cad_arm = _assemble_from_link_local(urdf, link_local_pts)
+            cam_pts = cad_arm @ R.T + t
+            dist, _ = arm_trees[p_idx].query(cam_pts, k=1)
+            parts.append(np.minimum(dist, inlier_d))
+        return np.concatenate(parts)
+
+    result = least_squares(
+        residuals,
+        x0,
+        method="trf",  # supports bounds; method='lm' does not
+        bounds=(lb, ub),
+        max_nfev=max_nfev,
+        ftol=ftol,
+        xtol=xtol,
+    )
+
+    T_opt = se3_exp(result.x[:6])
+    R_opt = T_opt[:3, :3]
+    t_opt = T_opt[:3, 3]
+    delta_opt = {n: float(result.x[6 + i]) for i, n in enumerate(optimize_joints)}
+    q = _rotation_to_quat_xyzw(R_opt)
+
+    per_pose_fit: list[float] = []
+    per_pose_rmse: list[float] = []
+    for p_idx, joints in enumerate(joint_angles_per_pose):
+        applied = {k: float(v) + delta_opt.get(k, 0.0) for k, v in joints.items()}
+        urdf.update_cfg(applied)
+        cad_arm = _assemble_from_link_local(urdf, link_local_pts)
+        cam_pts = cad_arm @ R_opt.T + t_opt
+        dist, _ = arm_trees[p_idx].query(cam_pts, k=1)
+        mask = dist < inlier_d
+        n_in = int(mask.sum())
+        per_pose_fit.append(n_in / max(1, len(cam_pts)))
+        per_pose_rmse.append(
+            float(np.sqrt(np.mean(dist[mask] ** 2))) if n_in else float("inf")
+        )
+
+    return JointOffsetBundleResult(
+        T=T_opt,
+        quat_xyzw=q,
+        translation_m=t_opt.copy(),
+        joint_offsets=delta_opt,
+        cost=float(result.cost),
+        per_pose_fitness=tuple(per_pose_fit),
+        per_pose_rmse_m=tuple(per_pose_rmse),
+        n_iterations=int(result.nfev),
+    )
+
+
+def _sample_link_local_pcds(urdf, target_n_points: int) -> dict[str, np.ndarray]:
+    """Sample each visual link's mesh ONCE in its own local frame.
+
+    Returns ``{link_name: (N_link, 3) numpy array}``.  N_link is allocated
+    proportional to the link's surface area so all links are represented.
+    """
+    import trimesh
+    from isaac_auto_scene.cad import _link_visual_mesh
+
+    meshes: dict[str, trimesh.Trimesh] = {}
+    for link_name in urdf.link_map.keys():
+        m = _link_visual_mesh(urdf, link_name)
+        if m is not None and isinstance(m, trimesh.Trimesh) and len(m.faces) > 0:
+            meshes[link_name] = m
+
+    if not meshes:
+        raise ValueError("URDF has no visual meshes to sample")
+
+    total_area = sum(m.area for m in meshes.values())
+    out: dict[str, np.ndarray] = {}
+    for ln, m in meshes.items():
+        share = max(50, int(round(target_n_points * m.area / total_area)))
+        pts, _ = trimesh.sample.sample_surface(m, count=share)
+        out[ln] = np.asarray(pts, dtype=np.float64)
+    return out
+
+
+def _assemble_from_link_local(
+    urdf,
+    link_local_pts: dict[str, np.ndarray],
+) -> np.ndarray:
+    """Apply current URDF FK to pre-sampled link-local CAD points."""
+    parts: list[np.ndarray] = []
+    for link_name, local_pts in link_local_pts.items():
+        T = np.asarray(urdf.get_transform(link_name), dtype=np.float64)
+        R = T[:3, :3]
+        t = T[:3, 3]
+        parts.append(local_pts @ R.T + t)
+    return np.vstack(parts)
+
+
 __all__ = [
     "BundleResult",
+    "JointOffsetBundleResult",
     "register_bundle",
+    "register_bundle_with_joints",
     "se3_exp",
     "se3_log",
 ]

@@ -157,6 +157,68 @@ def test_bundle_rejects_mismatched_lengths() -> None:
         register_bundle([np.zeros((10, 3))], [])
 
 
+def test_register_bundle_with_joints_recovers_known_offset(tmp_path) -> None:
+    """Inject a systematic shoulder_pan offset; bundle should recover it."""
+    import yourdfpy
+    from isaac_auto_scene.bundle_register import (
+        register_bundle_with_joints,
+        _sample_link_local_pcds,
+        _assemble_from_link_local,
+    )
+    from tests.fixtures.minimal_urdf import write_minimal_urdf
+
+    urdf_path = write_minimal_urdf(tmp_path)
+    urdf = yourdfpy.URDF.load(str(urdf_path))
+    actuated = urdf.actuated_joint_names
+
+    rng = np.random.default_rng(3)
+    # Build "real" arm clouds = CAD at (joints + true_offset) transformed by T_true.
+    R = _rand_so3(rng)
+    t = np.array([0.05, -0.03, 0.30])
+    T_true = np.eye(4); T_true[:3, :3] = R; T_true[:3, 3] = t
+    # Inject a small shoulder offset.
+    true_offset = {actuated[0]: 0.10}  # 0.1 rad on the first joint
+
+    link_local = _sample_link_local_pcds(urdf, target_n_points=800)
+
+    joints_per_pose = [
+        {actuated[0]: a} for a in [0.0, 0.2, -0.2, 0.4, -0.4]
+    ]
+    arm_clouds = []
+    for joints in joints_per_pose:
+        applied = {k: v + true_offset.get(k, 0.0) for k, v in joints.items()}
+        urdf.update_cfg(applied)
+        cad_arm = _assemble_from_link_local(urdf, link_local)
+        arm_pts = cad_arm @ R.T + t + rng.normal(scale=0.0015, size=cad_arm.shape)
+        arm_clouds.append(_pcd(arm_pts))
+
+    # Solve with T close to truth and zero initial offset.
+    result = register_bundle_with_joints(
+        urdf,
+        joints_per_pose,
+        arm_clouds,
+        T_init=T_true,
+        cad_target_n_points=800,
+        delta_bound_rad=0.5,
+        inlier_distance_m=0.05,
+    )
+    # Should recover ~0.1 rad on shoulder_pan; other joints near 0.
+    assert abs(result.joint_offsets[actuated[0]] - 0.10) < 0.05
+    np.testing.assert_allclose(result.T[:3, 3], t, atol=0.01)
+
+
+def test_register_bundle_with_joints_rejects_mismatched_inputs(tmp_path) -> None:
+    import yourdfpy
+    from isaac_auto_scene.bundle_register import register_bundle_with_joints
+    from tests.fixtures.minimal_urdf import write_minimal_urdf
+
+    urdf = yourdfpy.URDF.load(str(write_minimal_urdf(tmp_path)))
+    with pytest.raises(ValueError, match="align"):
+        register_bundle_with_joints(urdf, [{}], [])
+    with pytest.raises(ValueError, match=">=1 pose"):
+        register_bundle_with_joints(urdf, [], [])
+
+
 def test_bundle_returns_unit_quaternion() -> None:
     rng = np.random.default_rng(2)
     cad = rng.uniform(-0.05, 0.05, size=(300, 3))

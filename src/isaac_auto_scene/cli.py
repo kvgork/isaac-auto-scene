@@ -234,7 +234,69 @@ def cmd_register_multi(args: argparse.Namespace) -> int:
         fallback=fallback_fn,
     )
 
-    if getattr(args, "backend", "per_pose") == "bundle":
+    if getattr(args, "backend", "per_pose") == "bundle_joints":
+        from isaac_auto_scene.bundle_register import register_bundle_with_joints
+
+        if multi.per_pose:
+            best_pp = max(multi.per_pose, key=lambda p: p.fitness)
+            T_init = np.asarray(best_pp.T, dtype=np.float64)
+            print(
+                f"[register-multi] bundle_joints init: pose={best_pp.pose_name!r} "
+                f"fitness={best_pp.fitness:.3f}",
+                file=sys.stderr,
+            )
+        else:
+            T_init = multi.T
+
+        joints_per_pose = [
+            dict(rec.readback_joints) for rec in manifest.poses if rec.status == "ok"
+        ]
+        arm_clouds_only = [p[2] for p in pairs]
+        opt_joints = (
+            tuple(args.optimize_joints.split(",")) if args.optimize_joints else None
+        )
+        bj = register_bundle_with_joints(
+            urdf,
+            joints_per_pose,
+            arm_clouds_only,
+            optimize_joints=opt_joints,
+            T_init=T_init,
+            cad_target_n_points=args.target_n_points // 5,
+            inlier_distance_m=float(args.bundle_inlier_distance),
+            delta_bound_rad=float(args.joint_offset_bound),
+            max_nfev=int(args.bundle_max_nfev),
+        )
+        print(
+            f"[register-multi] bundle_joints: cost={bj.cost:.4f} nfev={bj.n_iterations}",
+            file=sys.stderr,
+        )
+        print(f"[register-multi] joint offsets (rad):", file=sys.stderr)
+        for k, v in bj.joint_offsets.items():
+            print(f"    {k:<16} {v:+.4f} ({np.degrees(v):+.2f} deg)", file=sys.stderr)
+
+        from isaac_auto_scene.register import MultiPoseResult, PerPoseRegistration
+
+        per_pose_records = tuple(
+            PerPoseRegistration(
+                pose_name=p[0],
+                accepted=True,
+                fitness=bj.per_pose_fitness[i],
+                inlier_rmse_m=bj.per_pose_rmse_m[i],
+                T=bj.T.copy(),
+            )
+            for i, p in enumerate(pairs)
+        )
+        multi = MultiPoseResult(
+            T=bj.T,
+            quat_xyzw=bj.quat_xyzw,
+            translation_m=bj.translation_m,
+            dispersion_rad=0.0,
+            n_accepted=len(pairs),
+            n_total=len(pairs),
+            per_pose=per_pose_records,
+        )
+
+    elif getattr(args, "backend", "per_pose") == "bundle":
         # Bundle-refine using the *best per-pose* ICP result as init.
         # The averaged T from register_multi_pose is biased by cylindrical-
         # symmetry ambiguity (each per-pose solve lands in a different basin
@@ -505,6 +567,8 @@ def cmd_smoke(args: argparse.Namespace) -> int:
         backend=args.backend,
         bundle_inlier_distance=args.bundle_inlier_distance,
         bundle_max_nfev=args.bundle_max_nfev,
+        optimize_joints=args.optimize_joints,
+        joint_offset_bound=args.joint_offset_bound,
     )
     try:
         rc = cmd_register_multi(reg_args)
@@ -702,11 +766,25 @@ def build_parser() -> argparse.ArgumentParser:
     prm.add_argument(
         "--backend",
         default="per_pose",
-        choices=["per_pose", "bundle"],
+        choices=["per_pose", "bundle", "bundle_joints"],
         help="Aggregation backend. 'per_pose' = independent ICP + weighted "
         "average (default, fast). 'bundle' = single SE(3) jointly optimised "
-        "across all poses via se(3) Levenberg-Marquardt (breaks cylindrical-"
-        "symmetry ambiguity that defeats per-pose averaging).",
+        "via se(3) LM. 'bundle_joints' = single SE(3) + per-joint offset "
+        "Δθ jointly optimised; absorbs systematic FK error (LeRobot servo "
+        "zero ≠ URDF zero) that otherwise compounds for large-excursion "
+        "poses.",
+    )
+    prm.add_argument(
+        "--optimize-joints",
+        default=None,
+        help="Comma-separated joint names to free in bundle_joints (default "
+        "= all actuated).",
+    )
+    prm.add_argument(
+        "--joint-offset-bound",
+        type=float,
+        default=0.35,
+        help="±rad bound on each joint offset (default 0.35 ≈ ±20°).",
     )
     prm.add_argument(
         "--bundle-inlier-distance",
@@ -842,11 +920,13 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument(
         "--backend",
         default="per_pose",
-        choices=["per_pose", "bundle"],
+        choices=["per_pose", "bundle", "bundle_joints"],
         help="Multi-pose aggregation backend.",
     )
     ps.add_argument("--bundle-inlier-distance", type=float, default=0.02)
     ps.add_argument("--bundle-max-nfev", type=int, default=200)
+    ps.add_argument("--optimize-joints", default=None)
+    ps.add_argument("--joint-offset-bound", type=float, default=0.35)
     ps.set_defaults(func=cmd_smoke)
 
     return p
