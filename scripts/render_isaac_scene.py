@@ -123,8 +123,27 @@ def main() -> int:
     )
     entities = build_isaac_scene(spec)
     camera = entities["camera"]
+    arm = entities.get("arm")
 
     sim.reset()
+
+    # Set SO-101 joint angles to match the captured pose.  Must happen
+    # AFTER sim.reset() so the Articulation indices are initialised.
+    if arm is not None and spec.arm_joint_angles_rad:
+        import torch as _torch
+        joint_names = list(arm.joint_names)
+        joint_pos = _torch.tensor(
+            [[float(spec.arm_joint_angles_rad.get(n, 0.0)) for n in joint_names]],
+            dtype=_torch.float32,
+        )
+        joint_vel = _torch.zeros_like(joint_pos)
+        arm.write_joint_state_to_sim(joint_pos, joint_vel)
+        arm.set_joint_position_target(joint_pos)
+        print(
+            f"[render] applied joint state: "
+            f"{ {n: round(float(spec.arm_joint_angles_rad.get(n, 0.0)), 3) for n in joint_names} }",
+            flush=True,
+        )
 
     # Pose camera (post-reset so internal indices are populated).
     # Convention: world frame = camera frame (camera_position_m = origin,

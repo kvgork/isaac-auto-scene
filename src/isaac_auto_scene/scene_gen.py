@@ -39,6 +39,11 @@ class SceneSpec:
         Camera pose in world frame.
     arm_position_m / arm_quat_xyzw:
         SO-101 root pose in world frame.
+    arm_joint_angles_rad:
+        Per-joint angles applied to the SO-101 articulation when spawning.
+        Populated from ``CalibrationOutput.joint_angles_at_capture`` so the
+        rendered arm matches the pose that was captured.  Empty dict
+        defaults to URDF home (all zeros).
     table_position_m / table_quat_xyzw:
         Table centroid pose in world frame.  Defaults place the table at
         the world origin (legacy behaviour); pass the calibrated values
@@ -64,6 +69,7 @@ class SceneSpec:
     table_size_m: tuple[float, float, float] = (0.6, 0.4, 0.02)
     table_position_m: tuple[float, float, float] = (0.0, 0.0, 0.0)
     table_quat_xyzw: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)
+    arm_joint_angles_rad: dict[str, float] = field(default_factory=dict)
     pinhole_cfg: dict[str, float | int] = field(default_factory=dict)
     enable_ros2: bool = False
     so101_usd_path: str | None = None
@@ -159,6 +165,7 @@ def build_scene_spec(
         camera_quat_xyzw=cam_q,
         arm_position_m=arm_t,  # type: ignore[arg-type]
         arm_quat_xyzw=arm_q,  # type: ignore[arg-type]
+        arm_joint_angles_rad=dict(calib.joint_angles_at_capture or {}),
         table_size_m=table_size_m,
         table_position_m=table_t,
         table_quat_xyzw=table_q,
@@ -322,21 +329,18 @@ def build_isaac_scene(spec: SceneSpec) -> dict[str, Any]:  # pragma: no cover - 
 
 
 def _build_so101_articulation(spec: SceneSpec, sim_utils: Any) -> Any:  # pragma: no cover
-    """Spawn the SO-101 USD at ``/World/SO101`` when an asset is available.
-
-    Returns the Articulation runtime wrapper (when Isaac Lab's articulation
-    runtime is needed for joint control), or ``None`` when no USD is
-    provided AND no default USD can be resolved.
+    """Spawn the SO-101 USD at ``/World/SO101`` and return the Articulation.
 
     The arm's root pose comes from ``spec.arm_position_m`` /
-    ``spec.arm_quat_xyzw`` (in world frame).
+    ``spec.arm_quat_xyzw``.  Joint angles default to URDF home; when the
+    spec carries ``arm_joint_angles_rad`` (e.g. from
+    ``CalibrationOutput.joint_angles_at_capture``) the returned
+    Articulation must have its joints written via
+    ``arm.write_joint_state_to_sim(...)`` AFTER ``sim.reset()``.  The
+    caller is responsible for that — see ``scripts/render_isaac_scene.py``.
 
-    Spawning subtlety: building ``ArticulationCfg(...)`` and instantiating
-    ``Articulation(cfg=cfg)`` does NOT put a prim onto the USD stage —
-    that's the runtime object only.  The stage prim only appears when
-    ``cfg.spawn.func(prim_path, cfg.spawn, translation, orientation)`` is
-    called explicitly (this is the same pattern the table + light use
-    above).  Forgetting this step makes the render show an empty scene.
+    Returns the Articulation runtime wrapper, or ``None`` when no USD is
+    provided / resolved.
     """
     usd_path = spec.so101_usd_path or resolve_default_so101_usd()
     if usd_path is None:
@@ -344,6 +348,11 @@ def _build_so101_articulation(spec: SceneSpec, sim_utils: Any) -> Any:  # pragma
 
     from isaaclab.actuators import ImplicitActuatorCfg
     from isaaclab.assets import Articulation, ArticulationCfg
+
+    joint_pos_init = {
+        name: float(spec.arm_joint_angles_rad.get(name, 0.0))
+        for name in SO101_JOINT_NAMES
+    }
 
     cfg = ArticulationCfg(
         prim_path="/World/SO101",
@@ -354,7 +363,7 @@ def _build_so101_articulation(spec: SceneSpec, sim_utils: Any) -> Any:  # pragma
         init_state=ArticulationCfg.InitialStateCfg(
             pos=spec.arm_position_m,
             rot=_quat_xyzw_to_wxyz(spec.arm_quat_xyzw),
-            joint_pos={name: 0.0 for name in SO101_JOINT_NAMES},
+            joint_pos=joint_pos_init,
             joint_vel={name: 0.0 for name in SO101_JOINT_NAMES},
         ),
         actuators={
@@ -365,20 +374,16 @@ def _build_so101_articulation(spec: SceneSpec, sim_utils: Any) -> Any:  # pragma
             ),
         },
     )
-    # Spawn the USD prim onto the stage.  We intentionally do NOT build
-    # the ``Articulation`` runtime wrapper after this — the wrapper tries
-    # to re-spawn the same prim and the second spawn produces a "prim
-    # already exists" warning (and, on PhysX 6, the kinematic-stage-id
-    # error observed in the smoke logs).  For static-frame render we
-    # just need the USD geometry on the stage; joint control + runtime
-    # state aren't required.
+    # Spawn the USD prim explicitly (UsdFileCfg.func) — the Articulation
+    # runtime wrapper that follows binds to this existing prim instead of
+    # re-spawning.
     cfg.spawn.func(
         "/World/SO101",
         cfg.spawn,
         translation=spec.arm_position_m,
         orientation=_quat_xyzw_to_wxyz(spec.arm_quat_xyzw),
     )
-    return None  # placeholder — caller already knows the prim_path
+    return Articulation(cfg=cfg)
 
 
 def _quat_xyzw_to_wxyz(q: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
