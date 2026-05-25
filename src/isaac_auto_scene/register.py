@@ -4,6 +4,8 @@ Public API
 ----------
 RegistrationResult       — frozen dataclass: T (4x4), fitness, rmse, used_fallback
 register_global_local()  — N random-rotation restart ICP + point-to-plane refine
+register_multi_pose()    — aggregate per-pose ICP results into one transform
+MultiPoseResult          — aggregated transform + per-pose diagnostics
 QUALITY_GATE             — (fitness_min, rmse_max_m) from research §6
 
 Design note
@@ -172,3 +174,186 @@ def register_global_local(
 def passes_quality_gate(result: RegistrationResult) -> bool:
     f_min, rmse_max = QUALITY_GATE
     return result.fitness >= f_min and result.inlier_rmse_m <= rmse_max
+
+
+# ---------------------------------------------------------------------------
+# Multi-pose aggregation
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PerPoseRegistration:
+    """One pose's contribution to a multi-pose registration."""
+
+    pose_name: str
+    accepted: bool
+    fitness: float
+    inlier_rmse_m: float
+    T: np.ndarray
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class MultiPoseResult:
+    """Aggregated multi-pose registration output.
+
+    Attributes
+    ----------
+    T:
+        4x4 mean transform (Markley quaternion average + weighted translation).
+    quat_xyzw:
+        Mean rotation as unit XYZW quaternion.
+    translation_m:
+        Mean translation in metres.
+    dispersion_rad:
+        Weighted-mean rotation angle between each accepted pose's transform
+        and the mean.  Treat large values (> ~0.05 rad ≈ 3°) as a hint that
+        the pose set is inconsistent.
+    n_accepted:
+        Number of poses that passed the per-pose quality gate.
+    n_total:
+        Total poses considered.
+    per_pose:
+        Per-pose diagnostics (accepted + reason for rejection if any).
+    """
+
+    T: np.ndarray
+    quat_xyzw: np.ndarray
+    translation_m: np.ndarray
+    dispersion_rad: float
+    n_accepted: int
+    n_total: int
+    per_pose: tuple[PerPoseRegistration, ...]
+
+
+def _registration_weight(result: RegistrationResult) -> float:
+    """Combine fitness + (1/rmse) into a positive scalar weight.
+
+    A small epsilon stops a tiny RMSE from dominating; using fitness as a
+    multiplier penalises low-overlap fits even when their RMSE is small.
+    """
+    eps = 1e-4  # 0.1 mm
+    rmse = max(float(result.inlier_rmse_m), eps)
+    return max(float(result.fitness), 0.0) / rmse
+
+
+def register_multi_pose(
+    pairs: list[
+        tuple[
+            str,
+            o3d.geometry.PointCloud,
+            o3d.geometry.PointCloud,
+        ]
+    ],
+    *,
+    voxel_size: float = 0.005,
+    n_restarts: int = 5,
+    coarse_distance: float = 0.05,
+    fine_distance: float = 0.01,
+    min_accepted: int = 2,
+) -> MultiPoseResult:
+    """Run per-pose ICP, reject outliers, aggregate into one transform.
+
+    Parameters
+    ----------
+    pairs:
+        List of ``(pose_name, source_cad_pcd, target_arm_pcd)`` tuples.
+        Each entry's ``T_cam_arm`` is estimated independently.
+    voxel_size, n_restarts, coarse_distance, fine_distance:
+        Passed through to :func:`register_global_local`.
+    min_accepted:
+        Minimum number of poses that must pass :data:`QUALITY_GATE` for the
+        aggregation to succeed.  Raises ``RuntimeError`` if fewer accepted.
+
+    Returns
+    -------
+    MultiPoseResult
+    """
+    from isaac_auto_scene.utils.transforms import (
+        mean_se3,
+        rotation_matrix_to_quat_xyzw,
+    )
+
+    if not pairs:
+        raise ValueError("register_multi_pose requires at least one pose pair")
+
+    per_pose: list[PerPoseRegistration] = []
+    accepted_Ts: list[np.ndarray] = []
+    accepted_weights: list[float] = []
+
+    for pose_name, src, tgt in pairs:
+        try:
+            reg = register_global_local(
+                src,
+                tgt,
+                voxel_size=voxel_size,
+                n_restarts=n_restarts,
+                coarse_distance=coarse_distance,
+                fine_distance=fine_distance,
+            )
+        except Exception as exc:
+            per_pose.append(
+                PerPoseRegistration(
+                    pose_name=pose_name,
+                    accepted=False,
+                    fitness=0.0,
+                    inlier_rmse_m=float("inf"),
+                    T=np.eye(4),
+                    reason=f"icp_error: {type(exc).__name__}: {exc}",
+                )
+            )
+            continue
+
+        if passes_quality_gate(reg):
+            per_pose.append(
+                PerPoseRegistration(
+                    pose_name=pose_name,
+                    accepted=True,
+                    fitness=reg.fitness,
+                    inlier_rmse_m=reg.inlier_rmse_m,
+                    T=np.asarray(reg.T, dtype=np.float64),
+                )
+            )
+            accepted_Ts.append(np.asarray(reg.T, dtype=np.float64))
+            accepted_weights.append(_registration_weight(reg))
+        else:
+            per_pose.append(
+                PerPoseRegistration(
+                    pose_name=pose_name,
+                    accepted=False,
+                    fitness=reg.fitness,
+                    inlier_rmse_m=reg.inlier_rmse_m,
+                    T=np.asarray(reg.T, dtype=np.float64),
+                    reason=(
+                        f"quality_gate(fitness>={QUALITY_GATE[0]:.2f},"
+                        f"rmse<={QUALITY_GATE[1]*1000:.0f}mm)"
+                    ),
+                )
+            )
+
+    n_accepted = len(accepted_Ts)
+    if n_accepted < min_accepted:
+        raise RuntimeError(
+            f"multi-pose registration failed: only {n_accepted}/{len(pairs)} "
+            f"poses passed quality gate (min={min_accepted}). "
+            f"Per-pose reasons: "
+            + "; ".join(f"{p.pose_name}={p.reason or 'ok'}" for p in per_pose)
+        )
+
+    stacked = np.stack(accepted_Ts, axis=0)
+    weights = np.asarray(accepted_weights, dtype=np.float64)
+    T_mean, q_mean, dispersion = mean_se3(stacked, weights)
+
+    # mean_se3 already gives quat_xyzw; recompute is a no-op but keeps
+    # MultiPoseResult.quat_xyzw consistent if mean_se3 internals ever change.
+    _ = rotation_matrix_to_quat_xyzw  # mark imported
+
+    return MultiPoseResult(
+        T=T_mean,
+        quat_xyzw=q_mean,
+        translation_m=T_mean[:3, 3].copy(),
+        dispersion_rad=dispersion,
+        n_accepted=n_accepted,
+        n_total=len(pairs),
+        per_pose=tuple(per_pose),
+    )

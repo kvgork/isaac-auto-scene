@@ -2,10 +2,12 @@
 
 Subcommands
 -----------
-calibrate  capture -> segment -> register -> calib.json
-generate   calib.json -> scene.usd (stub or full Isaac Sim asset)
-render     scene.usd -> PNG frames (requires Isaac Sim)
-validate   calib.json + scene.usd -> residual report
+calibrate      capture -> segment -> register -> calib.json
+capture-poses  drive arm through pose set -> per-pose RGB-D + manifest
+register-multi capture manifest -> aggregated calib.json
+generate       calib.json -> scene.usd (stub or full Isaac Sim asset)
+render         scene.usd -> PNG frames (requires Isaac Sim)
+validate       calib.json + scene.usd -> residual report
 """
 
 from __future__ import annotations
@@ -76,6 +78,126 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         save_capture(cap, out_dir)
 
     return 0 if passes_quality_gate(reg) else 2
+
+
+def cmd_capture_poses(args: argparse.Namespace) -> int:
+    """Drive arm through pose set; write per-pose RGB-D + manifest.yaml."""
+    from isaac_auto_scene.capture_multi import capture_pose_set
+    from isaac_auto_scene.poses import MockArmDriver, load_poses
+
+    urdf_path = Path(args.urdf)
+    urdf = load_urdf(urdf_path)
+    poses = load_poses(args.poses)
+
+    if args.mock_arm:
+        driver = MockArmDriver(
+            joint_names=tuple(urdf.actuated_joint_names),
+            readback_noise_rad=args.servo_noise,
+        )
+    else:  # pragma: no cover - hardware path
+        raise NotImplementedError(
+            "Hardware arm driver not yet wired; use --mock-arm for now."
+        )
+
+    if args.mock_cam:
+        source = MockD435Source(seed=args.seed)
+    else:  # pragma: no cover - hardware path
+        from isaac_auto_scene.realsense_source import RealSenseD435Source
+
+        source = RealSenseD435Source()
+
+    with driver as drv, source as src:
+        manifest = capture_pose_set(
+            poses,
+            drv,
+            src,
+            urdf,
+            urdf_path,
+            out_dir=Path(args.out),
+            frames_per_pose=args.frames,
+        )
+
+    print(
+        f"capture manifest -> {args.out}/manifest.yaml  "
+        f"({manifest.num_ok}/{manifest.num_poses} poses ok)"
+    )
+    return 0 if manifest.num_ok == manifest.num_poses else 2
+
+
+def cmd_register_multi(args: argparse.Namespace) -> int:
+    """Aggregate per-pose ICP runs into one calib.json."""
+    from isaac_auto_scene.capture_multi import load_manifest, load_pose_capture
+    from isaac_auto_scene.register import register_multi_pose
+
+    manifest_dir = Path(args.captures)
+    manifest = load_manifest(manifest_dir)
+    urdf = load_urdf(args.urdf)
+
+    pairs = []
+    last_cap = None
+    last_cad = None
+    for record in manifest.poses:
+        if record.status != "ok":
+            print(
+                f"skipping pose {record.name!r} (status={record.status})",
+                file=sys.stderr,
+            )
+            continue
+        cap = load_pose_capture(manifest_dir, record)
+        from isaac_auto_scene.segment import segment_table_arm
+
+        seg = segment_table_arm(cap.pcd)
+        cad = assemble_pcd(
+            urdf, record.readback_joints, target_n_points=args.target_n_points
+        )
+        pairs.append((record.name, _pcd_from_np(cad.points), seg.arm_cloud))
+        last_cap = cap
+        last_cad = cad
+
+    if not pairs:
+        print("ERROR: no usable poses in manifest", file=sys.stderr)
+        return 1
+
+    multi = register_multi_pose(
+        pairs,
+        voxel_size=args.voxel,
+        n_restarts=args.restarts,
+        min_accepted=args.min_accepted,
+    )
+
+    # Reuse build_calibration's quat conversion / intrinsics packaging via
+    # a synthetic single-pose RegistrationResult-like object.
+    from isaac_auto_scene.register import RegistrationResult
+
+    synthetic_reg = RegistrationResult(
+        T=multi.T,
+        fitness=float(np.mean([p.fitness for p in multi.per_pose if p.accepted])),
+        inlier_rmse_m=float(
+            np.mean([p.inlier_rmse_m for p in multi.per_pose if p.accepted])
+        ),
+        used_fallback=False,
+        n_restarts=args.restarts,
+    )
+    calib = build_calibration(last_cap, last_cad, synthetic_reg)
+    save_calibration(calib, Path(args.out))
+
+    print(
+        f"multi-pose calib -> {args.out}  "
+        f"({multi.n_accepted}/{multi.n_total} accepted, "
+        f"dispersion={multi.dispersion_rad*180/np.pi:.2f}°)"
+    )
+    for p in multi.per_pose:
+        tag = "OK " if p.accepted else "REJ"
+        rmse_mm = (
+            f"{p.inlier_rmse_m*1000:.2f} mm"
+            if np.isfinite(p.inlier_rmse_m)
+            else "inf"
+        )
+        print(
+            f"  [{tag}] {p.pose_name:<16} fitness={p.fitness:.3f} "
+            f"rmse={rmse_mm} {p.reason}"
+        )
+    return 0 if multi.n_accepted >= args.min_accepted else 2
 
 
 def cmd_generate(args: argparse.Namespace) -> int:
@@ -233,6 +355,36 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("--target-n-points", type=int, default=15_000)
     pc.add_argument("--dump-pcds", default=None, help="optional out dir for capture artefacts")
     pc.set_defaults(func=cmd_calibrate)
+
+    pcp = sub.add_parser(
+        "capture-poses", help="drive arm through pose set -> per-pose RGB-D"
+    )
+    pcp.add_argument("--urdf", required=True)
+    pcp.add_argument("--poses", required=True, help="path to poses.yaml")
+    pcp.add_argument("--out", required=True, help="output capture dir")
+    pcp.add_argument("--mock-arm", action="store_true")
+    pcp.add_argument("--mock-cam", action="store_true")
+    pcp.add_argument("--seed", type=int, default=0)
+    pcp.add_argument("--frames", type=int, default=30)
+    pcp.add_argument(
+        "--servo-noise",
+        type=float,
+        default=0.0,
+        help="Gaussian readback noise (rad) for MockArmDriver",
+    )
+    pcp.set_defaults(func=cmd_capture_poses)
+
+    prm = sub.add_parser(
+        "register-multi", help="capture manifest -> aggregated calib.json"
+    )
+    prm.add_argument("--captures", required=True, help="capture run directory")
+    prm.add_argument("--urdf", required=True)
+    prm.add_argument("--out", default="calib.json")
+    prm.add_argument("--voxel", type=float, default=0.005)
+    prm.add_argument("--restarts", type=int, default=5)
+    prm.add_argument("--target-n-points", type=int, default=15_000)
+    prm.add_argument("--min-accepted", type=int, default=2)
+    prm.set_defaults(func=cmd_register_multi)
 
     pg = sub.add_parser("generate", help="calib.json -> scene.usd")
     pg.add_argument("--calib", required=True)
