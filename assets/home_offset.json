@@ -1,0 +1,13 @@
+{
+  "home_offset_rad": {
+    "shoulder_pan": -0.043693917296102634,
+    "shoulder_lift": -1.3212020386600432,
+    "elbow_flex": 1.7453292519943295,
+    "wrist_flex": 0.6751230237549619,
+    "wrist_roll": -0.19699468025425385,
+    "gripper": 0.015309905719248503
+  },
+  "captured_at": "2026-05-25T13:15:56Z",
+  "port": "/dev/ttyACM0",
+  "note": "Subtract these values from any subsequent LeRobot readback before passing joints to URDF FK. The arm was physically in the URDF home pose when this file was written."
+}

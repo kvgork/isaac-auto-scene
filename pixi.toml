@@ -30,23 +30,20 @@ pyransac3d = "*"
 [feature.realsense.pypi-dependencies]
 pyrealsense2 = "*"
 
-[feature.lerobot.pypi-dependencies]
-# LeRobot SO-101 follower driver for real-arm capture via Feetech serial.
-# `feetech` extra installs the STSServoSDK transport.
+# NOTE: lerobot is intentionally NOT declared as a pixi feature.
+# Reason: lerobot 0.3.x depends on rerun-sdk which only publishes
+# manylinux_2_31 wheels (no sdist).  pixi's PyPI resolver advertises
+# the host as manylinux_2_28 on this build so `pixi install -e
+# hardware` fails to satisfy the rerun-sdk constraint even though
+# host glibc is 2.39 and the wheel installs fine.
 #
-# Version pin notes:
-#   - lerobot >=0.4 requires Python 3.12 but Isaac Sim 5.1 locks us to 3.11,
-#     so cap at <0.4.
-#   - lerobot 0.3.x exposes lerobot.robots.so_follower.SO101Follower already.
+# Install lerobot manually into the hardware env until pixi bumps its
+# manylinux baseline OR lerobot publishes broader-tag wheels:
 #
-# Resolver caveat: lerobot 0.3.x depends on rerun-sdk which only publishes
-# manylinux_2_31 wheels (no sdist).  pixi's PyPI resolver advertises the
-# host as manylinux_2_28 on this build so `pixi install -e hardware` fails
-# to satisfy the rerun-sdk constraint even though host glibc is 2.39 and
-# the wheel would install fine.  Until pixi bumps its manylinux baseline,
-# install lerobot into the hardware env directly:
-#   .pixi/envs/hardware/bin/pip install 'lerobot[feetech]>=0.3.2,<0.4'
-lerobot = { version = ">=0.3.2,<0.4", extras = ["feetech"] }
+#     pixi run install-lerobot
+#
+# (The install-lerobot task below pip-installs into the active env,
+#  bypassing the resolver.)
 
 
 # Isaac Sim 5.1 cannot be installed via pixi's conda/pypi resolver because
@@ -57,16 +54,9 @@ lerobot = { version = ">=0.3.2,<0.4", extras = ["feetech"] }
 # TODO: add isaacsim + isaaclab here once pixi supports per-package PyPI indexes
 # For now, install via: pixi run install-isaac
 
-[feature.ros2]
-# TODO: add ROS2 dependencies here (Phase 6)
-
 [environments]
 default = ["dev", "geometry"]
 sim = ["dev", "geometry", "isaac"]
-# `lerobot` feature is declared but NOT included in the hardware env
-# (see [feature.lerobot.pypi-dependencies] for the pixi resolver caveat).
-# Install separately via pip until the upstream rerun-sdk wheel situation
-# is resolved.
 hardware = ["dev", "geometry", "realsense"]
 full = ["dev", "geometry", "isaac", "realsense"]
 
@@ -77,3 +67,4 @@ lint = "ruff check src tests"
 fmt = "ruff format src tests"
 typecheck = "mypy src"
 install-isaac = "bash scripts/install_isaac.sh"
+install-lerobot = "pip install 'lerobot[feetech]>=0.3.2,<0.4'"

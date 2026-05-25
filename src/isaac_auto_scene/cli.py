@@ -741,31 +741,39 @@ def _offline_capture_for_manual_align(args: argparse.Namespace):
 
 
 def cmd_calibrate_arm(args: argparse.Namespace) -> int:
-    """Run LeRobot's interactive calibration on the SO-101 follower.
+    """Launch LeRobot's interactive calibration walkthrough.
 
-    Wraps ``SO101Follower.connect(calibrate=True)`` so users don't need to
-    remember the LeRobot module path.  After calibration completes the
-    driver disconnects cleanly and the calibration JSON is in LeRobot's
-    cache (typically ``~/.cache/huggingface/lerobot/calibration/...``).
+    Spawns ``python -m lerobot.calibrate --robot.type=so101_follower
+    --robot.port=...`` so the walkthrough's stdin prompts reach the user's
+    terminal directly.  Wrapping it as a subprocess (instead of importing
+    and calling internals) keeps the interactive parts working — lerobot
+    uses ``input()`` for the per-motor calibration steps and that needs
+    a real TTY, not our argparse callback context.
     """
-    from isaac_auto_scene.lerobot_arm import LeRobotSO101Config, LeRobotSO101Driver
+    import subprocess
 
-    driver = LeRobotSO101Driver(
-        config=LeRobotSO101Config(port=args.arm_port, calibrate=True)
-    )
-    print(
-        f"[calibrate-arm] connecting to {args.arm_port} with calibrate=True. "
-        f"Follow the prompts on LeRobot's calibration walkthrough.",
-        file=sys.stderr,
-    )
+    cmd = [
+        sys.executable,
+        "-m",
+        "lerobot.calibrate",
+        f"--robot.type=so101_follower",
+        f"--robot.port={args.arm_port}",
+    ]
+    if args.robot_id:
+        cmd.append(f"--robot.id={args.robot_id}")
+    print("[calibrate-arm] $ " + " ".join(cmd), file=sys.stderr)
     try:
-        driver.connect()
-    except Exception as exc:
-        print(f"ERROR: calibration failed: {exc}", file=sys.stderr)
+        proc = subprocess.run(cmd, check=False)
+    except FileNotFoundError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
         return 1
-    driver.disconnect()
-    print("[calibrate-arm] calibration done. Now use 'set-home' with the arm")
-    print("                 physically placed in the URDF home pose.")
+    if proc.returncode != 0:
+        print(
+            f"[calibrate-arm] lerobot.calibrate exited rc={proc.returncode}",
+            file=sys.stderr,
+        )
+        return proc.returncode
+    print("[calibrate-arm] done. Place arm in URDF home pose, then run 'set-home'.")
     return 0
 
 
@@ -1167,6 +1175,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="run LeRobot's interactive calibration on the SO-101 follower",
     )
     pca.add_argument("--arm-port", default="/dev/ttyACM0")
+    pca.add_argument(
+        "--robot-id",
+        default=None,
+        help="optional robot identifier passed to lerobot.calibrate",
+    )
     pca.set_defaults(func=cmd_calibrate_arm)
 
     psh = sub.add_parser(
