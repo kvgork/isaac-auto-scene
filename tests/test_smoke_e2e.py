@@ -72,6 +72,9 @@ def test_smoke_mock_capture_and_register(tmp_path: Path) -> None:
         servo_noise=0.0,
         arm_port="/dev/ttyACM0",
         arm_calibrate=False,
+        check_floor=False,
+        floor_z=-0.005,
+        home_offset=None,
     )
     rc = cmd_capture_poses(capture_args)
     assert rc == 0

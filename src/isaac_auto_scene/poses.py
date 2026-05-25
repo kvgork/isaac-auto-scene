@@ -213,6 +213,95 @@ class PoseValidationReport:
         return self.ok
 
 
+def check_pose_clears_floor(
+    pose: JointPose,
+    urdf: yourdfpy.URDF,
+    *,
+    floor_z_m: float = -0.005,
+    home_offset_rad: dict[str, float] | None = None,
+) -> list[PoseValidationError]:
+    """Refuse poses whose URDF-FK puts any link below ``floor_z_m``.
+
+    Prevents the arm from being commanded into a configuration that
+    would slam the gripper / wrist through the table surface.
+
+    Parameters
+    ----------
+    pose:
+        Pose with LeRobot-frame joint angles (the YAML values).
+    urdf:
+        Loaded URDF.
+    floor_z_m:
+        Z threshold in URDF-world coords below which a link is
+        considered to penetrate the table.  Slight negative tolerance
+        (-5 mm) absorbs URDF-frame origin noise without false alarms.
+    home_offset_rad:
+        Per-joint offset to subtract before running FK (so LeRobot zero
+        maps to URDF zero).  Pass the contents of ``home_offset.json``
+        when validating against a calibrated arm; ``None`` skips the
+        adjustment (use only if LeRobot zero == URDF zero).
+    """
+    import trimesh
+
+    out: list[PoseValidationError] = []
+    cfg = {n: 0.0 for n in urdf.actuated_joint_names}
+    cfg.update(pose.joints)
+    if home_offset_rad:
+        for k in list(cfg.keys()):
+            cfg[k] = float(cfg[k]) - float(home_offset_rad.get(k, 0.0))
+    urdf.update_cfg(cfg)
+
+    for link_name, link in urdf.link_map.items():
+        if not link.visuals:
+            continue
+        try:
+            T = np.asarray(urdf.get_transform(link_name), dtype=np.float64)
+        except Exception:
+            continue
+        # Approximate the link's lowest visible point by transforming the
+        # mesh AABB through the link's world transform.
+        for visual in link.visuals:
+            geom = getattr(visual, "geometry", None)
+            if geom is None:
+                continue
+            mesh = None
+            if geom.mesh is not None and visual.name:
+                mesh = urdf.scene.geometry.get(visual.name)
+            if mesh is None:
+                continue
+            try:
+                aabb = np.asarray(mesh.bounds, dtype=np.float64)  # (2, 3)
+            except Exception:
+                continue
+            corners = np.array(
+                [
+                    [aabb[0, 0], aabb[0, 1], aabb[0, 2]],
+                    [aabb[0, 0], aabb[0, 1], aabb[1, 2]],
+                    [aabb[0, 0], aabb[1, 1], aabb[0, 2]],
+                    [aabb[0, 0], aabb[1, 1], aabb[1, 2]],
+                    [aabb[1, 0], aabb[0, 1], aabb[0, 2]],
+                    [aabb[1, 0], aabb[0, 1], aabb[1, 2]],
+                    [aabb[1, 0], aabb[1, 1], aabb[0, 2]],
+                    [aabb[1, 0], aabb[1, 1], aabb[1, 2]],
+                ]
+            )
+            world_corners = corners @ T[:3, :3].T + T[:3, 3]
+            min_z = float(world_corners[:, 2].min())
+            if min_z < floor_z_m:
+                out.append(
+                    PoseValidationError(
+                        pose_name=pose.name,
+                        reason=(
+                            f"link {link_name!r} predicted at z_min="
+                            f"{min_z*1000:.1f}mm (below floor "
+                            f"{floor_z_m*1000:.1f}mm) — would slam the table"
+                        ),
+                    )
+                )
+                break
+    return out
+
+
 def validate_pose(
     pose: JointPose,
     urdf: yourdfpy.URDF,
@@ -280,8 +369,17 @@ def validate_pose_set(
     urdf: yourdfpy.URDF,
     *,
     check_self_collision: bool = False,
+    check_floor: bool = False,
+    floor_z_m: float = -0.005,
+    home_offset_rad: dict[str, float] | None = None,
 ) -> PoseValidationReport:
-    """Validate a list of poses; collect errors and dedup names."""
+    """Validate a list of poses; collect errors and dedup names.
+
+    Set ``check_floor=True`` to also refuse any pose whose URDF-FK
+    predicts a link below ``floor_z_m`` (i.e. through the table).
+    Pass ``home_offset_rad`` (from ``set-home`` output) so the FK is
+    evaluated in URDF coords rather than raw LeRobot servo coords.
+    """
     errors: list[PoseValidationError] = []
     seen: set[str] = set()
     for pose in poses:
@@ -295,6 +393,15 @@ def validate_pose_set(
         errors.extend(
             validate_pose(pose, urdf, check_self_collision=check_self_collision)
         )
+        if check_floor:
+            errors.extend(
+                check_pose_clears_floor(
+                    pose,
+                    urdf,
+                    floor_z_m=floor_z_m,
+                    home_offset_rad=home_offset_rad,
+                )
+            )
     return PoseValidationReport(ok=not errors, errors=tuple(errors))
 
 

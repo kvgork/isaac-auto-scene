@@ -109,6 +109,9 @@ def capture_pose_set(
     run_id: str | None = None,
     sleep: "callable[[float], None]" = time.sleep,
     validate: bool = True,
+    check_floor: bool = False,
+    floor_z_m: float = -0.005,
+    home_offset_rad: dict[str, float] | None = None,
 ) -> MultiCaptureManifest:
     """Drive *driver* through *poses* and capture RGB-D per pose.
 
@@ -149,7 +152,13 @@ def capture_pose_set(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if validate:
-        report: PoseValidationReport = validate_pose_set(poses, urdf)
+        report: PoseValidationReport = validate_pose_set(
+            poses,
+            urdf,
+            check_floor=check_floor,
+            floor_z_m=floor_z_m,
+            home_offset_rad=home_offset_rad,
+        )
         if not report.ok:
             messages = "\n".join(
                 f"  - {e.pose_name}: {e.reason}" for e in report.errors

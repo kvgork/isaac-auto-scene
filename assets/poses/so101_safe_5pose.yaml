@@ -1,0 +1,67 @@
+# Conservative 5-pose set for SO-101 multi-pose calibration on a table.
+#
+# All values are LeRobot servo angles (radians).  Driver converts to
+# degrees before sending.  The home pose is whatever position the arm
+# was in when `set-home` was run — typically resting flat on the table.
+#
+# Excursions are kept small (≤ 0.30 rad = ~17°) and bias UPWARD
+# (positive shoulder_lift, positive elbow_flex) so the arm stays above
+# the table surface.  Pure shoulder_pan rotations are safe at any
+# magnitude within URDF limits because they only rotate around the
+# vertical axis.
+#
+# The aggressive so101_smoke_5pose.yaml will slam the gripper into the
+# table when LeRobot's zero is offset from the URDF zero (which it is
+# after running `set-home`).  Use this safe set first; once you have a
+# rough calib, capture the bigger set with confidence.
+
+poses:
+  - name: home
+    joints:
+      shoulder_pan: 0.0
+      shoulder_lift: 0.0
+      elbow_flex: 0.0
+      wrist_flex: 0.0
+      wrist_roll: 0.0
+      gripper: 0.0
+    settle_s: 1.5
+
+  - name: pan_left
+    joints:
+      shoulder_pan: +0.30     # ~17° CCW (top-down view)
+      shoulder_lift: 0.0
+      elbow_flex: 0.0
+      wrist_flex: 0.0
+      wrist_roll: 0.0
+      gripper: 0.0
+    settle_s: 1.5
+
+  - name: pan_right
+    joints:
+      shoulder_pan: -0.30     # ~-17° CW
+      shoulder_lift: 0.0
+      elbow_flex: 0.0
+      wrist_flex: 0.0
+      wrist_roll: 0.0
+      gripper: 0.0
+    settle_s: 1.5
+
+  - name: lift_up
+    joints:
+      shoulder_pan: 0.0
+      shoulder_lift: +0.20    # raise shoulder slightly (~11°)
+      elbow_flex: 0.0
+      wrist_flex: 0.0
+      wrist_roll: 0.0
+      gripper: 0.0
+    settle_s: 1.5
+
+  - name: fold_in
+    joints:
+      shoulder_pan: 0.0
+      shoulder_lift: +0.15
+      elbow_flex: +0.25       # fold elbow upward
+      wrist_flex: 0.0
+      wrist_roll: 0.0
+      gripper: 0.0
+    settle_s: 1.5
