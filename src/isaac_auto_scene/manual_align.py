@@ -86,10 +86,20 @@ def run_manual_align(
     step_m: float = 0.01,
     rot_step_deg: float = 5.0,
     icp_threshold_m: float = 0.02,
+    final_icp_refine: bool = True,
 ) -> np.ndarray | None:
     """Open an interactive window for manual SE(3) alignment.
 
-    Returns the final 4x4 matrix when the user presses ENTER, or
+    Parameters
+    ----------
+    final_icp_refine:
+        If True (default), run a local tensor-API point-to-plane ICP
+        pass on confirm (Y / ENTER) before returning the final T.
+        Set False to return EXACTLY the user's manual T without any
+        ICP nudge — useful when symmetry ambiguity makes ICP
+        rotate away from a carefully-placed pose.
+
+    Returns the final 4x4 matrix when the user presses Y / ENTER, or
     ``None`` if the window was closed without saving.
     """
     if T_init is None:
@@ -236,12 +246,27 @@ def run_manual_align(
     vis.register_key_callback(32, _icp_snap)  # SPACE
 
     def _confirm(_v):
+        if not final_icp_refine:
+            print(
+                "[manual-align] saving manual T as-is (--no-icp-refine).",
+                flush=True,
+            )
+            confirmed["value"] = True
+            vis.close()
+            return False
         # Final ICP refinement at the configured threshold before saving.
         try:
+            T_before = state.T.copy()
             delta, fit, rmse = _run_icp(icp_threshold_m)
+            delta_t = float(np.linalg.norm(delta[:3, 3]))
+            # Rotation magnitude (axis-angle).
+            tr = max(-1.0, min(1.0, (np.trace(delta[:3, :3]) - 1.0) / 2.0))
+            delta_r_deg = float(np.degrees(np.arccos(tr)))
             print(
                 f"[manual-align] final ICP refine: fitness={fit:.3f} "
-                f"rmse={rmse*1000:.2f}mm — applied before save"
+                f"rmse={rmse*1000:.2f}mm  "
+                f"(nudged manual T by {delta_t*1000:.1f}mm + "
+                f"{delta_r_deg:.2f}°)"
             )
             _apply_delta(delta)
         except Exception as exc:  # pragma: no cover - GUI runtime
@@ -283,9 +308,12 @@ def _print_legend() -> None:
         "                                Z     : reset to --init-from",
         "",
         "  SAVE / CANCEL",
-        "    Y       : run final ICP refine + save calib.json",
+        "    Y       : (final ICP refine if enabled) + save calib.json",
         "    ENTER   : same as Y (may not work on all builds)",
         "    close X : cancel without saving",
+        "",
+        "  Pass --no-icp-refine on the CLI to save the manual T exactly",
+        "  as placed (no automatic ICP nudge on confirm).",
         "==========================================================",
         "",
     ]

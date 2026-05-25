@@ -1013,6 +1013,7 @@ def cmd_manual_align(args: argparse.Namespace) -> int:
         step_m=args.step,
         rot_step_deg=args.rot_step,
         icp_threshold_m=args.icp_threshold,
+        final_icp_refine=not args.no_icp_refine,
     )
     if T_final is None:
         print("[manual-align] window closed without confirmation, no calib written")
@@ -1053,6 +1054,20 @@ def cmd_manual_align_all(args: argparse.Namespace) -> int:
     ok_poses = [r for r in manifest.poses if r.status == "ok"]
     home_offset = _load_home_offset(getattr(args, "home_offset", None))
 
+    # Optional starting T from a prior calib.json (e.g. previous
+    # manual-align result).  Applied to EVERY pose's viewer so the user
+    # only has to nudge from a sensible starting point.
+    T_init_all = np.eye(4)
+    init_from = getattr(args, "init_from", None)
+    if init_from:
+        prev = load_calibration(init_from)
+        T_init_all = np.asarray(prev.T_cam_arm, dtype=np.float64)
+        print(
+            f"[manual-align-all] init from {init_from} "
+            f"(T_cam_arm.translation={prev.translation_m})",
+            flush=True,
+        )
+
     print(
         f"[manual-align-all] {len(ok_poses)} pose(s) to align. "
         f"Output dir: {out_dir}",
@@ -1081,11 +1096,12 @@ def cmd_manual_align_all(args: argparse.Namespace) -> int:
         T_final = run_manual_align(
             cad.points,
             seg.arm_cloud,
-            T_init=np.eye(4),
+            T_init=T_init_all,
             window_title=f"manual-align: {rec.name} ({idx}/{len(ok_poses)})",
             step_m=args.step,
             rot_step_deg=args.rot_step,
             icp_threshold_m=args.icp_threshold,
+            final_icp_refine=not args.no_icp_refine,
         )
         if T_final is None:
             print(
@@ -1517,6 +1533,13 @@ def build_parser() -> argparse.ArgumentParser:
     pma.add_argument("--arm-merge-radius", type=float, default=0.0)
     pma.add_argument("--outlier-neighbors", type=int, default=0)
     pma.add_argument("--outlier-std", type=float, default=2.0)
+    pma.add_argument(
+        "--no-icp-refine",
+        action="store_true",
+        help="Save the manual T exactly as placed.  Skips the local "
+        "ICP nudge that normally runs on Y/ENTER, so symmetry-ambiguous "
+        "poses don't get rotated away from a careful placement.",
+    )
     pma.set_defaults(func=cmd_manual_align)
 
     pmaa = sub.add_parser(
@@ -1543,6 +1566,15 @@ def build_parser() -> argparse.ArgumentParser:
     pmaa.add_argument("--arm-merge-radius", type=float, default=0.0)
     pmaa.add_argument("--outlier-neighbors", type=int, default=0)
     pmaa.add_argument("--outlier-std", type=float, default=2.0)
+    pmaa.add_argument("--no-icp-refine", action="store_true")
+    pmaa.add_argument(
+        "--init-from",
+        default=None,
+        help="Seed each pose's manual aligner from this calib.json (e.g. "
+        "the result of a prior manual-align or register-multi run) "
+        "instead of starting at identity.  Saves time when consecutive "
+        "alignment sessions only need small per-pose adjustments.",
+    )
     pmaa.set_defaults(func=cmd_manual_align_all)
 
     pv = sub.add_parser("validate", help="forward-projection residual report")

@@ -70,6 +70,7 @@ def segment_table_arm(
     arm_merge_radius_m: float = 0.0,
     outlier_nb_neighbors: int = 0,
     outlier_std_ratio: float = 2.0,
+    recluster_after_outlier: bool = True,
 ) -> SegmentResult:
     """Segment the dominant plane and the largest off-plane cluster.
 
@@ -223,6 +224,30 @@ def segment_table_arm(
             nb_neighbors=int(outlier_nb_neighbors),
             std_ratio=float(outlier_std_ratio),
         )
+
+    # Final connectivity filter — keep only the largest connected cluster
+    # to drop disconnected stragglers (cable tips, sensor noise floating
+    # off the arm's main body).  Open3D RANSAC + outlier removal can
+    # leave 100-500 point islands far from the arm centroid; those get
+    # rendered as wisps in the manual-align viewer and inflate ICP RMSE.
+    #
+    # Skip when arm_merge_radius_m > 0: the caller deliberately unioned
+    # disjoint clusters, and reclustering would just kill the merge.
+    skip_recluster = arm_merge_radius_m > 0.0
+    if recluster_after_outlier and not skip_recluster and len(arm_cloud.points) > dbscan_min_points:
+        labels = np.asarray(
+            arm_cloud.cluster_dbscan(
+                eps=dbscan_eps_m,
+                min_points=dbscan_min_points,
+                print_progress=False,
+            )
+        )
+        valid_mask = labels >= 0
+        if valid_mask.any():
+            unique, counts = np.unique(labels[valid_mask], return_counts=True)
+            keep_label = int(unique[counts.argmax()])
+            keep_idx = np.where(labels == keep_label)[0]
+            arm_cloud = arm_cloud.select_by_index(keep_idx.tolist())
 
     return SegmentResult(
         T_world_table=T,
