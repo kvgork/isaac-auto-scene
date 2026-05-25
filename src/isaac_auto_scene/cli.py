@@ -373,10 +373,29 @@ def cmd_smoke(args: argparse.Namespace) -> int:
         target_n_points=15_000,
         min_accepted=max(1, len(yaml.safe_load(Path(args.poses).read_text())["poses"]) // 2),
     )
-    rc = cmd_register_multi(reg_args)
+    try:
+        rc = cmd_register_multi(reg_args)
+    except RuntimeError as exc:
+        # register_multi_pose raises when zero poses clear the quality gate.
+        # On the synthetic mock path (pose-invariant MockD435Source) every
+        # pose reuses the same depth, so the gate cannot be satisfied.  The
+        # rest of the pipeline plumbing was verified by stage 1; surface
+        # the gate failure and skip render rather than crashing.
+        print(f"[smoke] register-multi quality gate fail: {exc}", file=sys.stderr)
+        print(
+            "[smoke] no calib.json produced; expected on --mock (synthetic "
+            "mock is pose-invariant). Real hardware: investigate ICP "
+            "convergence.",
+            file=sys.stderr,
+        )
+        return 2
     if rc not in (0, 2):  # 2 = quality-gate fail; calib.json still written
         print(f"[smoke] register-multi failed (rc={rc})", file=sys.stderr)
         return rc
+    if not calib_path.exists():
+        print("[smoke] register-multi returned but no calib.json written; halting",
+              file=sys.stderr)
+        return 2
 
     # ---- Stage 3: render ----
     render_args = argparse.Namespace(
