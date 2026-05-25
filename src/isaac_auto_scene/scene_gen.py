@@ -283,11 +283,21 @@ def build_isaac_scene(spec: SceneSpec) -> dict[str, Any]:  # pragma: no cover - 
 
 
 def _build_so101_articulation(spec: SceneSpec, sim_utils: Any) -> Any:  # pragma: no cover
-    """Spawn the SO-101 ArticulationCfg at ``/World/SO101`` when USD is available.
+    """Spawn the SO-101 USD at ``/World/SO101`` when an asset is available.
 
-    Returns the Articulation instance, or None when no USD is provided AND
-    no default USD can be resolved.  The arm's root pose comes from
-    ``spec.arm_position_m`` / ``spec.arm_quat_xyzw`` (in world frame).
+    Returns the Articulation runtime wrapper (when Isaac Lab's articulation
+    runtime is needed for joint control), or ``None`` when no USD is
+    provided AND no default USD can be resolved.
+
+    The arm's root pose comes from ``spec.arm_position_m`` /
+    ``spec.arm_quat_xyzw`` (in world frame).
+
+    Spawning subtlety: building ``ArticulationCfg(...)`` and instantiating
+    ``Articulation(cfg=cfg)`` does NOT put a prim onto the USD stage —
+    that's the runtime object only.  The stage prim only appears when
+    ``cfg.spawn.func(prim_path, cfg.spawn, translation, orientation)`` is
+    called explicitly (this is the same pattern the table + light use
+    above).  Forgetting this step makes the render show an empty scene.
     """
     usd_path = spec.so101_usd_path or resolve_default_so101_usd()
     if usd_path is None:
@@ -316,7 +326,20 @@ def _build_so101_articulation(spec: SceneSpec, sim_utils: Any) -> Any:  # pragma
             ),
         },
     )
-    return Articulation(cfg=cfg)
+    # Spawn the USD prim onto the stage.  We intentionally do NOT build
+    # the ``Articulation`` runtime wrapper after this — the wrapper tries
+    # to re-spawn the same prim and the second spawn produces a "prim
+    # already exists" warning (and, on PhysX 6, the kinematic-stage-id
+    # error observed in the smoke logs).  For static-frame render we
+    # just need the USD geometry on the stage; joint control + runtime
+    # state aren't required.
+    cfg.spawn.func(
+        "/World/SO101",
+        cfg.spawn,
+        translation=spec.arm_position_m,
+        orientation=_quat_xyzw_to_wxyz(spec.arm_quat_xyzw),
+    )
+    return None  # placeholder — caller already knows the prim_path
 
 
 def _quat_xyzw_to_wxyz(q: tuple[float, float, float, float]) -> tuple[float, float, float, float]:

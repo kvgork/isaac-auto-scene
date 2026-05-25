@@ -126,13 +126,18 @@ def main() -> int:
 
     sim.reset()
 
-    # Pose camera (post-reset so internal indices are populated)
-    cam_t = np.array(spec.arm_position_m, dtype=np.float32)
-    cam_view_pos = torch.tensor(
-        [[float(cam_t[0]), float(cam_t[1]), float(0.3)]], dtype=torch.float32
+    # Pose camera (post-reset so internal indices are populated).
+    # Convention: world frame = camera frame (camera_position_m = origin,
+    # camera_quat_xyzw = identity).  Arm sits at spec.arm_position_m —
+    # which is exactly where the calibration says it is, expressed in the
+    # camera frame.  So we look from origin AT the arm position.
+    cam_position = torch.tensor([[0.0, 0.0, 0.0]], dtype=torch.float32)
+    arm_t = np.array(spec.arm_position_m, dtype=np.float32)
+    target = torch.tensor(
+        [[float(arm_t[0]), float(arm_t[1]), float(arm_t[2])]],
+        dtype=torch.float32,
     )
-    target = torch.tensor([[0.0, 0.0, 0.0]], dtype=torch.float32)
-    camera.set_world_poses_from_view(cam_view_pos, target)
+    camera.set_world_poses_from_view(cam_position, target)
 
     if args.ros2:
         from isaac_auto_scene.ros2_bridge import (  # noqa: E402
