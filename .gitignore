@@ -33,3 +33,7 @@ tests/fixtures/*.ply
 .vscode/
 *.swp
 *.swo
+
+# Open3D Visualizer screen captures (created on Ctrl+S / Ctrl+P in the viewer)
+ScreenCamera_*.json
+ScreenCapture_*.png

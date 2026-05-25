@@ -110,10 +110,18 @@ def run_manual_align(
     cad_geom.paint_uniform_color((0.95, 0.15, 0.15))
     cad_geom.transform(state.T)
 
+    arm_pts = np.asarray(arm_cloud.points)
+    scene_size = float(np.linalg.norm(arm_pts.max(0) - arm_pts.min(0))) if len(arm_pts) else 0.3
+    axis_size = max(0.05, 0.25 * scene_size)
+
+    # World-frame coord triad at origin: X = red, Y = green, Z = blue.
+    world_axes = o3d.geometry.TriangleMesh.create_coordinate_frame(size=axis_size)
+
     vis = o3d.visualization.VisualizerWithKeyCallback()
     vis.create_window(window_name=window_title, width=width, height=height)
     vis.add_geometry(arm_geom)
     vis.add_geometry(cad_geom)
+    vis.add_geometry(world_axes)
     vis.get_render_option().background_color = np.array([0.05, 0.05, 0.08])
     vis.get_render_option().point_size = 2.5
 
@@ -193,54 +201,96 @@ def run_manual_align(
     vis.register_key_callback(ord("R"), lambda _v: (_reset(np.eye(4)), False)[1])
     vis.register_key_callback(ord("Z"), lambda _v: (_reset(state.T_init), False)[1])
 
-    # ICP snap (SPACE = 32).
+    def _run_icp(threshold: float) -> tuple[np.ndarray, float, float]:
+        """Tensor-API point-to-plane ICP from current state.T. Returns (delta_T, fitness, rmse)."""
+        src = o3d.geometry.PointCloud()
+        src.points = o3d.utility.Vector3dVector(cad_local)
+        src.transform(state.T)
+        src_t = o3d.t.geometry.PointCloud.from_legacy(src)
+        tgt_t = o3d.t.geometry.PointCloud.from_legacy(arm_geom)
+        tgt_t.estimate_normals(radius=max(0.01, threshold), max_nn=30)
+        reg = o3d.t.pipelines.registration.icp(
+            src_t,
+            tgt_t,
+            max_correspondence_distance=threshold,
+            init_source_to_target=o3d.core.Tensor(np.eye(4), dtype=o3d.core.Dtype.Float64),
+            estimation_method=o3d.t.pipelines.registration.TransformationEstimationPointToPlane(),
+        )
+        return (
+            np.asarray(reg.transformation.numpy(), dtype=np.float64),
+            float(reg.fitness),
+            float(reg.inlier_rmse),
+        )
+
     def _icp_snap(_v):
         try:
-            src = o3d.geometry.PointCloud()
-            src.points = o3d.utility.Vector3dVector(cad_local)
-            src.transform(state.T)
-            src_t = o3d.t.geometry.PointCloud.from_legacy(src)
-            tgt_t = o3d.t.geometry.PointCloud.from_legacy(arm_geom)
-            tgt_t.estimate_normals(radius=0.02, max_nn=30)
-            reg = o3d.t.pipelines.registration.icp(
-                src_t,
-                tgt_t,
-                max_correspondence_distance=icp_threshold_m,
-                init_source_to_target=o3d.core.Tensor(np.eye(4), dtype=o3d.core.Dtype.Float64),
-                estimation_method=o3d.t.pipelines.registration.TransformationEstimationPointToPlane(),
-            )
-            delta = reg.transformation.numpy()
+            delta, fit, rmse = _run_icp(icp_threshold_m)
             print(
-                f"[manual-align] ICP snap: fitness={reg.fitness:.3f} "
-                f"rmse={reg.inlier_rmse*1000:.2f}mm"
+                f"[manual-align] ICP snap: fitness={fit:.3f} rmse={rmse*1000:.2f}mm"
             )
-            _apply_delta(np.asarray(delta, dtype=np.float64))
+            _apply_delta(delta)
         except Exception as exc:  # pragma: no cover - GUI runtime
             print(f"[manual-align] ICP snap failed: {exc}")
         return False
 
     vis.register_key_callback(32, _icp_snap)  # SPACE
 
-    # Confirm (ENTER = 257 on Open3D / GLFW; also bind RIGHT-BRACKET fallback handled above).
     def _confirm(_v):
+        # Final ICP refinement at the configured threshold before saving.
+        try:
+            delta, fit, rmse = _run_icp(icp_threshold_m)
+            print(
+                f"[manual-align] final ICP refine: fitness={fit:.3f} "
+                f"rmse={rmse*1000:.2f}mm — applied before save"
+            )
+            _apply_delta(delta)
+        except Exception as exc:  # pragma: no cover - GUI runtime
+            print(f"[manual-align] final ICP refine failed (saving anyway): {exc}")
         confirmed["value"] = True
         vis.close()
         return False
 
-    vis.register_key_callback(257, _confirm)  # ENTER
-    vis.register_key_callback(ord("\r"), _confirm)
+    # Multiple save bindings — ENTER is unreliable across Open3D builds.
+    vis.register_key_callback(ord("Y"), _confirm)   # primary
+    vis.register_key_callback(257, _confirm)        # GLFW_KEY_ENTER
+    vis.register_key_callback(ord("\r"), _confirm)  # carriage return fallback
 
-    print(
-        "[manual-align] controls: WASDQE=translate, IJKL/UO=rotate, "
-        "+/-/[]=steps, SPACE=ICP snap, R=reset to identity, Z=reset to "
-        "init, ENTER=accept, close window=cancel"
-    )
+    _print_legend()
     vis.run()
     vis.destroy_window()
 
     if confirmed["value"]:
         return last_T_holder["T"]
     return None
+
+
+def _print_legend() -> None:
+    """Print the manual-align key legend as a readable terminal table."""
+    lines = [
+        "",
+        "================ MANUAL ALIGN — CONTROLS =================",
+        "  Coord triad at origin: X=RED  Y=GREEN  Z=BLUE",
+        "  Camera (D435) frame: +X right, +Y down, +Z forward",
+        "",
+        "  TRANSLATION                ROTATION (about CAD centroid)",
+        "    A / D   :  -X / +X        J / L  :  yaw  (Y axis)",
+        "    W / S   :  -Y / +Y        I / K  :  pitch (X axis)",
+        "    Q / E   :  -Z / +Z        U / O  :  roll  (Z axis)",
+        "",
+        "  STEP SIZE                  ACTIONS",
+        "    +  /  - : trans x2 / /2    SPACE : snap to ICP",
+        "    ]  /  [ : rot   x2 / /2    R     : reset to identity",
+        "                                Z     : reset to --init-from",
+        "",
+        "  SAVE / CANCEL",
+        "    Y       : run final ICP refine + save calib.json",
+        "    ENTER   : same as Y (may not work on all builds)",
+        "    close X : cancel without saving",
+        "==========================================================",
+        "",
+    ]
+    for ln in lines:
+        print(ln)
 
 
 __all__ = ["run_manual_align", "ManualAlignState"]
