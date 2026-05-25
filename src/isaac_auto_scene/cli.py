@@ -686,12 +686,30 @@ def _live_capture_for_manual_align(args: argparse.Namespace, urdf):
     with driver as drv, source as src:
         joints = drv.read_joints()
         cap = capture(source=src, num_frames=args.frames)
-    print(
-        f"[manual-align live] joints (rad): "
-        f"{ {k: round(v, 3) for k, v in joints.items()} }",
-        file=sys.stderr,
-    )
+    _print_joint_readback(joints, urdf)
     return cap, joints
+
+
+def _print_joint_readback(joints: dict, urdf) -> None:
+    """Pretty-print joint readback with rad + deg + URDF-limit position."""
+    print()
+    print("================ LeRobot SO-101 joint readback ================")
+    print(f"  {'joint':<16s} {'rad':>10s} {'deg':>10s} {'urdf-limits (rad)':>22s}")
+    print(f"  {'-'*16} {'-'*10} {'-'*10} {'-'*22}")
+    for name in urdf.actuated_joint_names:
+        if name not in joints:
+            continue
+        rad = float(joints[name])
+        deg = np.degrees(rad)
+        lim = urdf.joint_map.get(name)
+        if lim is not None and lim.limit is not None:
+            lo, hi = float(lim.limit.lower), float(lim.limit.upper)
+            limstr = f"[{lo:+.3f}, {hi:+.3f}]"
+        else:
+            limstr = "(unbounded)"
+        print(f"  {name:<16s} {rad:+10.3f} {deg:+10.2f}° {limstr:>22s}")
+    print("=================================================================")
+    print()
 
 
 def _offline_capture_for_manual_align(args: argparse.Namespace):
