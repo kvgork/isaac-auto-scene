@@ -50,7 +50,28 @@ class RealSenseD435Source:
     # ------------------------------------------------------------------
 
     def start(self) -> None:
-        """Start the RealSense pipeline and filters."""
+        """Start the RealSense pipeline and filters.
+
+        Raises
+        ------
+        RuntimeError
+            If the D435 is enumerated on USB 2.x. The 640x480@30 depth+color
+            stream stalls past the 5s wait_for_frames budget on USB 2.0 once
+            spatial+temporal filters and alignment are wired in. Fail fast
+            instead of waiting on a timeout.
+        """
+        ctx = rs.context()  # type: ignore[union-attr]
+        devices = list(ctx.query_devices())
+        if not devices:
+            raise RuntimeError("RealSenseD435Source: no RealSense device found")
+        usb_type = devices[0].get_info(rs.camera_info.usb_type_descriptor)  # type: ignore[union-attr]
+        if not usb_type.startswith("3"):
+            raise RuntimeError(
+                f"RealSenseD435Source: D435 enumerated on USB {usb_type}; "
+                "requires USB 3.x. Replug into a USB3 port (blue connector / "
+                "marked SS) and re-run."
+            )
+
         pipeline = rs.pipeline()  # type: ignore[union-attr]
         cfg = rs.config()  # type: ignore[union-attr]
         cfg.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)  # type: ignore[union-attr]
