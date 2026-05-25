@@ -1,0 +1,39 @@
+# Safe 3-pose set for the isaac-auto-scene hardware smoke.
+#
+# Joint names match the canonical SO-101 URDF (so101_new_calib.urdf).
+# Magnitudes are kept small to minimise risk of self-collision or
+# table-impact on first-time hardware bringup. Increase the shoulder_pan
+# offsets once you have visual confirmation the arm clears the workspace.
+#
+# Angles are in RADIANS (matches the rest of the codebase; the driver
+# converts to degrees on the wire). 0.26 rad ≈ 15 degrees.
+poses:
+  - name: home
+    joints:
+      shoulder_pan: 0.0
+      shoulder_lift: 0.0
+      elbow_flex: 0.0
+      wrist_flex: 0.0
+      wrist_roll: 0.0
+      gripper: 0.0
+    settle_s: 1.5
+
+  - name: pan_left
+    joints:
+      shoulder_pan: 0.26       # +15 deg, base rotates CCW (top-down view)
+      shoulder_lift: 0.0
+      elbow_flex: 0.0
+      wrist_flex: 0.0
+      wrist_roll: 0.0
+      gripper: 0.0
+    settle_s: 1.5
+
+  - name: pan_right
+    joints:
+      shoulder_pan: -0.26      # -15 deg
+      shoulder_lift: 0.0
+      elbow_flex: 0.0
+      wrist_flex: 0.0
+      wrist_roll: 0.0
+      gripper: 0.0
+    settle_s: 1.5
