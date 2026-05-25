@@ -54,7 +54,8 @@ def test_manual_align_state_dataclass() -> None:
     np.testing.assert_allclose(state.T, np.eye(4))
 
 
-def test_manual_align_subparser_present() -> None:
+def test_manual_align_subparser_offline() -> None:
+    """Offline mode (--captures + --pose) parses cleanly."""
     from isaac_auto_scene.cli import build_parser
 
     parser = build_parser()
@@ -69,4 +70,23 @@ def test_manual_align_subparser_present() -> None:
     )
     assert args.cmd == "manual-align"
     assert args.pose == "home"
-    assert args.step == pytest.approx(0.01)
+    assert args.live is False
+
+
+def test_manual_align_subparser_live_default() -> None:
+    """Live mode (only --urdf) works — --captures + --pose are optional."""
+    from isaac_auto_scene.cli import build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "manual-align",
+            "--urdf", "/tmp/x.urdf",
+            "--out", "/tmp/calib.json",
+        ]
+    )
+    assert args.cmd == "manual-align"
+    assert args.captures is None
+    assert args.pose is None
+    assert args.arm_port == "/dev/ttyACM0"
+    assert args.frames == 15

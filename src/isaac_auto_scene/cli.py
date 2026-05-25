@@ -654,18 +654,56 @@ def cmd_smoke(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_manual_align(args: argparse.Namespace) -> int:
-    """Interactive viewer for manual CAD-over-arm alignment.
+def _live_capture_for_manual_align(args: argparse.Namespace, urdf):
+    """Capture one D435 frame + read SO-101 joints. Returns (CaptureResult, joints)."""
+    from isaac_auto_scene.capture import capture
+    from isaac_auto_scene.lerobot_arm import LeRobotSO101Config, LeRobotSO101Driver
 
-    Opens a window with the segmented arm cloud (green) + URDF-FK CAD
-    (red) for one pose.  User drives the CAD with keyboard until happy,
-    then ENTER writes calib.json.
-    """
+    if args.mock_arm:
+        from isaac_auto_scene.poses import MockArmDriver
+
+        driver = MockArmDriver(
+            joint_names=tuple(urdf.actuated_joint_names),
+            readback_noise_rad=0.0,
+        )
+    else:
+        driver = LeRobotSO101Driver(
+            config=LeRobotSO101Config(port=args.arm_port, calibrate=False)
+        )
+
+    if args.mock_cam:
+        source = MockD435Source(seed=0)
+    else:
+        from isaac_auto_scene.realsense_source import RealSenseD435Source
+
+        source = RealSenseD435Source()
+
+    print(
+        f"[manual-align live] connecting arm@{args.arm_port}, capturing "
+        f"{args.frames} D435 frames...",
+        file=sys.stderr,
+    )
+    with driver as drv, source as src:
+        joints = drv.read_joints()
+        cap = capture(source=src, num_frames=args.frames)
+    print(
+        f"[manual-align live] joints (rad): "
+        f"{ {k: round(v, 3) for k, v in joints.items()} }",
+        file=sys.stderr,
+    )
+    return cap, joints
+
+
+def _offline_capture_for_manual_align(args: argparse.Namespace):
+    """Load a pose from an existing captures manifest. Returns (cap, joints) or (None, None)."""
     from isaac_auto_scene.capture_multi import load_manifest, load_pose_capture
-    from isaac_auto_scene.manual_align import run_manual_align
-    from isaac_auto_scene.register import RegistrationResult
-    from isaac_auto_scene.segment import segment_table_arm
 
+    if not args.pose:
+        print(
+            "ERROR: --captures requires --pose to select which entry to load",
+            file=sys.stderr,
+        )
+        return None, None
     manifest = load_manifest(Path(args.captures))
     matching = [r for r in manifest.poses if r.name == args.pose and r.status == "ok"]
     if not matching:
@@ -674,12 +712,37 @@ def cmd_manual_align(args: argparse.Namespace) -> int:
             f"Available: {[r.name for r in manifest.poses]}",
             file=sys.stderr,
         )
-        return 1
+        return None, None
     rec = matching[0]
     cap = load_pose_capture(Path(args.captures), rec)
+    return cap, dict(rec.readback_joints)
+
+
+def cmd_manual_align(args: argparse.Namespace) -> int:
+    """Interactive viewer for manual CAD-over-arm alignment.
+
+    Two input modes:
+      - ``--live`` (default when --captures is omitted): capture one
+        fresh D435 frame and read joint state from the SO-101 follower,
+        then open the viewer.  Self-contained — no prior capture-poses
+        run needed.
+      - ``--captures DIR --pose NAME``: load a previously captured pose
+        from a capture-poses manifest.  Useful for offline iteration.
+    """
+    from isaac_auto_scene.manual_align import run_manual_align
+    from isaac_auto_scene.register import RegistrationResult
+    from isaac_auto_scene.segment import segment_table_arm
 
     urdf = load_urdf(args.urdf)
-    cad = assemble_pcd(urdf, rec.readback_joints, target_n_points=args.target_n_points)
+
+    if args.live or not args.captures:
+        cap, joints = _live_capture_for_manual_align(args, urdf)
+    else:
+        cap, joints = _offline_capture_for_manual_align(args)
+        if cap is None:
+            return 1
+
+    cad = assemble_pcd(urdf, joints, target_n_points=args.target_n_points)
 
     seg = segment_table_arm(
         cap.pcd,
@@ -970,13 +1033,37 @@ def build_parser() -> argparse.ArgumentParser:
         "manual-align",
         help="interactive viewer to manually align CAD over a captured arm cloud",
     )
-    pma.add_argument("--captures", required=True, help="capture run directory")
     pma.add_argument("--urdf", required=True)
     pma.add_argument(
-        "--pose",
-        required=True,
-        help="pose name to align (must match a row in captures/manifest.yaml)",
+        "--live",
+        action="store_true",
+        help="capture one fresh D435 frame + read arm joints (default when "
+        "--captures is omitted). Self-contained; no prior capture-poses run.",
     )
+    pma.add_argument(
+        "--captures",
+        default=None,
+        help="optional: existing capture run dir.  Pair with --pose to load "
+        "a previously saved pose instead of live-capturing.",
+    )
+    pma.add_argument(
+        "--pose",
+        default=None,
+        help="pose name in --captures manifest (required when --captures set)",
+    )
+    pma.add_argument(
+        "--arm-port",
+        default="/dev/ttyACM0",
+        help="serial port for SO-101 follower (live mode)",
+    )
+    pma.add_argument(
+        "--frames",
+        type=int,
+        default=15,
+        help="temporal-median frame count for the live D435 capture",
+    )
+    pma.add_argument("--mock-arm", action="store_true")
+    pma.add_argument("--mock-cam", action="store_true")
     pma.add_argument("--out", default="calib.json")
     pma.add_argument(
         "--init-from",
