@@ -118,3 +118,38 @@ def test_resolve_default_so101_usd_or_none() -> None:
     result = resolve_default_so101_usd()
     if result is not None:
         assert Path(result).exists()
+
+
+def test_scene_spec_table_pose_defaults(tmp_path: Path) -> None:
+    """Legacy calib without T_cam_table -> table at world origin (back-compat)."""
+    calib = _stub_calib(tmp_path)
+    assert calib.T_cam_table is None
+    spec = build_scene_spec(calib)
+    assert spec.table_position_m == (0.0, 0.0, 0.0)
+    assert spec.table_quat_xyzw == (0.0, 0.0, 0.0, 1.0)
+
+
+def test_scene_spec_table_pose_from_calib(tmp_path: Path) -> None:
+    """When calib carries T_cam_table the spec reflects it."""
+    import dataclasses
+
+    calib_no_table = _stub_calib(tmp_path)
+    # Build a calib with a non-trivial table pose: rotated 45° about X,
+    # translated 0.5m forward, 0.2m down (camera-frame coords).
+    R = np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, np.cos(np.pi / 4), -np.sin(np.pi / 4)],
+            [0.0, np.sin(np.pi / 4), np.cos(np.pi / 4)],
+        ]
+    )
+    T = np.eye(4)
+    T[:3, :3] = R
+    T[:3, 3] = [0.0, 0.2, 0.5]
+    calib = dataclasses.replace(calib_no_table, T_cam_table=T.tolist())
+    spec = build_scene_spec(calib)
+    np.testing.assert_allclose(spec.table_position_m, (0.0, 0.2, 0.5), atol=1e-9)
+    # Rotation part: identity X-axis maps to itself; check quat is non-trivial.
+    q = np.asarray(spec.table_quat_xyzw)
+    assert abs(np.linalg.norm(q) - 1.0) < 1e-9
+    assert abs(q[3] - np.cos(np.pi / 8)) < 1e-6  # w of half-angle 45°/2 about X

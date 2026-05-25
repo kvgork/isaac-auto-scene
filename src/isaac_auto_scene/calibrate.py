@@ -44,6 +44,12 @@ class CalibrationOutput:
         Inlier RMSE reported by register_global_local.
     joint_angles_at_capture:
         Joint-angle mapping that was used to build the CAD source cloud.
+    T_cam_table:
+        Optional 4x4 transform mapping table frame -> camera frame.
+        Populated from the segmentation step's ``T_world_table``.  When
+        present the renderer places the table at this pose instead of
+        sitting at the camera origin.  Default ``None`` keeps existing
+        calib.json files loadable unchanged.
     """
 
     T_cam_arm: list[list[float]]
@@ -53,6 +59,7 @@ class CalibrationOutput:
     icp_fitness: float
     inlier_rmse_m: float
     joint_angles_at_capture: dict[str, float]
+    T_cam_table: list[list[float]] | None = None
 
 
 def _rot_to_quat_xyzw(R: np.ndarray) -> np.ndarray:
@@ -91,12 +98,19 @@ def build_calibration(
     capture_result: "CaptureResult",
     cad_result: "CADResult",
     register_result: "RegistrationResult",
+    *,
+    T_cam_table: np.ndarray | None = None,
 ) -> CalibrationOutput:
     """Assemble a CalibrationOutput from the three pipeline stages.
 
     The registration is expected to align ``cad_result`` (source) to the
     arm cloud segmented from ``capture_result`` (target), so
     ``register_result.T`` maps arm/CAD frame -> camera frame.
+
+    Pass ``T_cam_table`` (``segment_table_arm(...).T_world_table``) so
+    the resulting calib carries enough information for the renderer to
+    place the table cuboid at its actual position relative to the
+    camera.
     """
     T = np.asarray(register_result.T, dtype=np.float64)
     R = T[:3, :3]
@@ -114,6 +128,10 @@ def build_calibration(
         "depth_unit": float(capture_result.depth_unit),
     }
 
+    T_cam_table_payload: list[list[float]] | None = None
+    if T_cam_table is not None:
+        T_cam_table_payload = np.asarray(T_cam_table, dtype=np.float64).tolist()
+
     return CalibrationOutput(
         T_cam_arm=T.tolist(),
         quat_xyzw=q.tolist(),
@@ -122,6 +140,7 @@ def build_calibration(
         icp_fitness=float(register_result.fitness),
         inlier_rmse_m=float(register_result.inlier_rmse_m),
         joint_angles_at_capture=dict(cad_result.joint_angles),
+        T_cam_table=T_cam_table_payload,
     )
 
 

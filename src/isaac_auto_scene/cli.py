@@ -132,7 +132,7 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         cad_pcd, seg.arm_cloud, voxel_size=args.voxel, n_restarts=args.restarts
     )
 
-    calib = build_calibration(cap, cad, reg)
+    calib = build_calibration(cap, cad, reg, T_cam_table=seg.T_world_table)
     save_calibration(calib, Path(args.out))
 
     print(f"calib.json written -> {args.out}")
@@ -211,6 +211,7 @@ def cmd_register_multi(args: argparse.Namespace) -> int:
     pairs = []
     last_cap = None
     last_cad = None
+    last_T_table = None
     for record in manifest.poses:
         if record.status != "ok":
             print(
@@ -240,6 +241,7 @@ def cmd_register_multi(args: argparse.Namespace) -> int:
         pairs.append((record.name, _pcd_from_np(cad.points), seg.arm_cloud))
         last_cap = cap
         last_cad = cad
+        last_T_table = seg.T_world_table
 
     if not pairs:
         print("ERROR: no usable poses in manifest", file=sys.stderr)
@@ -406,7 +408,9 @@ def cmd_register_multi(args: argparse.Namespace) -> int:
         used_fallback=False,
         n_restarts=args.restarts,
     )
-    calib = build_calibration(last_cap, last_cad, synthetic_reg)
+    calib = build_calibration(
+        last_cap, last_cad, synthetic_reg, T_cam_table=last_T_table
+    )
     save_calibration(calib, Path(args.out))
 
     if getattr(args, "dump_debug", None):
@@ -929,7 +933,7 @@ def cmd_manual_align(args: argparse.Namespace) -> int:
         used_fallback=True,
         n_restarts=0,
     )
-    calib = build_calibration(cap, cad, synth_reg)
+    calib = build_calibration(cap, cad, synth_reg, T_cam_table=seg.T_world_table)
     save_calibration(calib, Path(args.out))
     print(f"manual-align calib -> {args.out}")
     return 0

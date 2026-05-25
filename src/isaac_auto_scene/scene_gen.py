@@ -39,6 +39,11 @@ class SceneSpec:
         Camera pose in world frame.
     arm_position_m / arm_quat_xyzw:
         SO-101 root pose in world frame.
+    table_position_m / table_quat_xyzw:
+        Table centroid pose in world frame.  Defaults place the table at
+        the world origin (legacy behaviour); pass the calibrated values
+        from ``CalibrationOutput.T_cam_table`` to position the table
+        where the segmenter actually found it relative to the camera.
     table_size_m:
         (sx, sy, sz) cuboid table extents.
     pinhole_cfg:
@@ -57,6 +62,8 @@ class SceneSpec:
     arm_position_m: tuple[float, float, float]
     arm_quat_xyzw: tuple[float, float, float, float]
     table_size_m: tuple[float, float, float] = (0.6, 0.4, 0.02)
+    table_position_m: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    table_quat_xyzw: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)
     pinhole_cfg: dict[str, float | int] = field(default_factory=dict)
     enable_ros2: bool = False
     so101_usd_path: str | None = None
@@ -124,14 +131,28 @@ def build_scene_spec(
         K, int(calib.intrinsics["width"]), int(calib.intrinsics["height"])
     )
 
-    # The calibration provides arm-in-camera transform; the camera-in-world
-    # is the identity here (camera == world for the simplest case where the
-    # table frame is the camera frame).  For richer scenes the orchestrator
-    # would supply T_world_camera explicitly.
+    # The calibration provides arm-in-camera transform; world == camera
+    # frame (camera at origin, identity rotation).  For richer scenes the
+    # orchestrator would supply T_world_camera explicitly.
     arm_t = tuple(calib.translation_m)
     arm_q = tuple(calib.quat_xyzw)
     cam_t = (0.0, 0.0, 0.0)
     cam_q = (0.0, 0.0, 0.0, 1.0)
+
+    # Table pose: prefer the segmentation-derived T_cam_table when it's in
+    # the calib payload (new schema).  Legacy calibs fall back to placing
+    # the table at the world origin.
+    table_t = (0.0, 0.0, 0.0)
+    table_q = (0.0, 0.0, 0.0, 1.0)
+    if calib.T_cam_table is not None:
+        T = np.asarray(calib.T_cam_table, dtype=np.float64)
+        R = T[:3, :3]
+        t = T[:3, 3]
+        from isaac_auto_scene.utils.transforms import rotation_matrix_to_quat_xyzw
+
+        q = rotation_matrix_to_quat_xyzw(R)
+        table_t = (float(t[0]), float(t[1]), float(t[2]))
+        table_q = (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
 
     return SceneSpec(
         camera_position_m=cam_t,
@@ -139,6 +160,8 @@ def build_scene_spec(
         arm_position_m=arm_t,  # type: ignore[arg-type]
         arm_quat_xyzw=arm_q,  # type: ignore[arg-type]
         table_size_m=table_size_m,
+        table_position_m=table_t,
+        table_quat_xyzw=table_q,
         pinhole_cfg=pinhole_cfg,
         enable_ros2=enable_ros2,
     )
@@ -258,7 +281,23 @@ def build_isaac_scene(spec: SceneSpec) -> dict[str, Any]:  # pragma: no cover - 
     from isaaclab.sensors.camera import Camera, CameraCfg
 
     table_cfg = sim_utils.CuboidCfg(size=spec.table_size_m)
-    table_cfg.func("/World/Table", table_cfg, translation=(0.0, 0.0, -spec.table_size_m[2] / 2))
+    # Place the table centroid at spec.table_position_m, sunk by half its
+    # thickness so the top surface lies on the calibrated plane.  The
+    # rotation comes from the segmenter's T_world_table fit (Z = plane
+    # normal) so the cuboid lies flat along that surface.
+    t = spec.table_position_m
+    half_thick = spec.table_size_m[2] / 2.0
+    sunken = (
+        float(t[0]),
+        float(t[1]),
+        float(t[2]) - half_thick,
+    )
+    table_cfg.func(
+        "/World/Table",
+        table_cfg,
+        translation=sunken,
+        orientation=_quat_xyzw_to_wxyz(spec.table_quat_xyzw),
+    )
 
     light_cfg = sim_utils.DomeLightCfg(intensity=1500.0, color=(1.0, 1.0, 1.0))
     light_cfg.func("/World/DomeLight", light_cfg)
