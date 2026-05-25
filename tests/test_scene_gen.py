@@ -71,7 +71,9 @@ def test_write_usd_stub_nonempty(tmp_path: Path) -> None:
     assert contents.startswith("#usda 1.0")
     assert "def Camera \"D435\"" in contents
     assert "def Xform \"SO101\"" in contents
-    assert "def Cube \"Table\"" in contents
+    # Table is now an Xform with a Cube child (so we can transform it).
+    assert "def Xform \"Table\"" in contents
+    assert "def Cube \"Geometry\"" in contents
     assert out.stat().st_size > 200
 
 

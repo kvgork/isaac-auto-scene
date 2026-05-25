@@ -224,6 +224,19 @@ def write_usd_stub(spec: SceneSpec, out_path: Path) -> Path:
     cam_m = _matrix(spec.camera_position_m, spec.camera_quat_xyzw)
     arm_m = _matrix(spec.arm_position_m, spec.arm_quat_xyzw)
     sx, sy, sz = spec.table_size_m
+    # Sink the table by half its thickness so the top surface lies on
+    # the calibrated plane — same convention as build_isaac_scene.
+    table_t_sunken = (
+        spec.table_position_m[0],
+        spec.table_position_m[1],
+        spec.table_position_m[2] - sz / 2.0,
+    )
+    table_m = _matrix(table_t_sunken, spec.table_quat_xyzw)
+
+    so101_usd = spec.so101_usd_path or resolve_default_so101_usd()
+    so101_ref_line = (
+        f'        prepend references = @{so101_usd}@\n' if so101_usd else ""
+    )
 
     contents = f"""#usda 1.0
 (
@@ -243,17 +256,24 @@ def Xform "World"
         int2 resolution = ({int(spec.pinhole_cfg.get("width", 640))}, {int(spec.pinhole_cfg.get("height", 480))})
     }}
 
-    def Xform "SO101"
+    def Xform "SO101" (
+{so101_ref_line}    )
     {{
         matrix4d xformOp:transform = {arm_m}
         uniform token[] xformOpOrder = ["xformOp:transform"]
     }}
 
-    def Cube "Table"
+    def Xform "Table"
     {{
-        double size = 1.0
-        double3 xformOp:scale = ({sx}, {sy}, {sz})
-        uniform token[] xformOpOrder = ["xformOp:scale"]
+        matrix4d xformOp:transform = {table_m}
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+
+        def Cube "Geometry"
+        {{
+            double size = 1.0
+            double3 xformOp:scale = ({sx}, {sy}, {sz})
+            uniform token[] xformOpOrder = ["xformOp:scale"]
+        }}
     }}
 
     def DomeLight "DomeLight"
