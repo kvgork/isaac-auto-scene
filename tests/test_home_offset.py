@@ -11,7 +11,8 @@ from isaac_auto_scene.cli import _apply_home_offset, _load_home_offset, build_pa
 
 
 def test_load_home_offset_none() -> None:
-    assert _load_home_offset(None) == {}
+    # auto_discover=False to ignore any real ~/.config file on the dev host.
+    assert _load_home_offset(None, auto_discover=False) == {}
 
 
 def test_load_home_offset_file(tmp_path: Path) -> None:

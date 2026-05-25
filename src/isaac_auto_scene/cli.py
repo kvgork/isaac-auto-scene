@@ -106,6 +106,81 @@ def _default_manual_calibs_dir() -> Path:
     return _config_dir() / "manual-calibs"
 
 
+def _resolve_bundle_init(args, multi):
+    """Pick the bundle solver's starting T.
+
+    Precedence (highest first):
+      1. --init-from <calib.json>  — explicit user override.
+      2. --init-from-dir <dir>     — average T_cam_arm across calib_*.json
+                                      in dir (e.g. manual-align-all output),
+                                      weighted by stored fitness.
+      3. multi.per_pose best       — highest-fitness pose's per-pose ICP T.
+      4. multi.T                   — the weighted per-pose average.
+    """
+    import json as _json
+
+    init_from = getattr(args, "init_from", None)
+    init_from_dir = getattr(args, "init_from_dir", None)
+    if init_from:
+        T = np.asarray(
+            _json.loads(Path(init_from).read_text())["T_cam_arm"],
+            dtype=np.float64,
+        )
+        print(
+            f"[register-multi] bundle init from {init_from} "
+            f"(translation={T[:3, 3].tolist()})",
+            file=sys.stderr,
+        )
+        return T
+    if init_from_dir:
+        T = _average_calibs_in_dir(init_from_dir)
+        if T is not None:
+            print(
+                f"[register-multi] bundle init from mean of "
+                f"{init_from_dir}/calib_*.json (translation={T[:3, 3].tolist()})",
+                file=sys.stderr,
+            )
+            return T
+    if multi.per_pose:
+        best_pp = max(multi.per_pose, key=lambda p: p.fitness)
+        print(
+            f"[register-multi] bundle init: best per-pose ICP "
+            f"({best_pp.pose_name!r}, fitness={best_pp.fitness:.3f})",
+            file=sys.stderr,
+        )
+        return np.asarray(best_pp.T, dtype=np.float64)
+    return multi.T
+
+
+def _average_calibs_in_dir(dir_path: str) -> np.ndarray | None:
+    """Compute the (fitness-weighted) Markley quaternion-mean SE(3) over
+    every calib_*.json in ``dir_path``.  Returns ``None`` if no matching
+    files exist.
+    """
+    import json as _json
+
+    from isaac_auto_scene.utils.transforms import mean_se3
+
+    d = Path(dir_path)
+    if not d.is_dir():
+        return None
+    Ts = []
+    weights = []
+    for p in sorted(d.glob("calib_*.json")):
+        try:
+            data = _json.loads(p.read_text())
+            T = np.asarray(data["T_cam_arm"], dtype=np.float64)
+            w = max(float(data.get("icp_fitness", 1.0)), 1e-3)
+            Ts.append(T)
+            weights.append(w)
+        except (OSError, KeyError, ValueError):
+            continue
+    if not Ts:
+        return None
+    T_mean, _, _ = mean_se3(np.stack(Ts), np.asarray(weights))
+    return T_mean
+
+
 def _resolve_fallback(args: argparse.Namespace):
     """Return the fallback registration callable specified by --fallback, or None."""
     name = getattr(args, "fallback", None) or "none"
@@ -354,16 +429,7 @@ def cmd_register_multi(args: argparse.Namespace) -> int:
     if getattr(args, "backend", "per_pose") == "bundle_joints":
         from isaac_auto_scene.bundle_register import register_bundle_with_joints
 
-        if multi.per_pose:
-            best_pp = max(multi.per_pose, key=lambda p: p.fitness)
-            T_init = np.asarray(best_pp.T, dtype=np.float64)
-            print(
-                f"[register-multi] bundle_joints init: pose={best_pp.pose_name!r} "
-                f"fitness={best_pp.fitness:.3f}",
-                file=sys.stderr,
-            )
-        else:
-            T_init = multi.T
+        T_init = _resolve_bundle_init(args, multi)
 
         joints_per_pose = [
             dict(rec.readback_joints) for rec in manifest.poses if rec.status == "ok"
@@ -421,16 +487,7 @@ def cmd_register_multi(args: argparse.Namespace) -> int:
         # is closer to the true T.
         from isaac_auto_scene.bundle_register import register_bundle
 
-        if multi.per_pose:
-            best_pp = max(multi.per_pose, key=lambda p: p.fitness)
-            T_init = np.asarray(best_pp.T, dtype=np.float64)
-            print(
-                f"[register-multi] bundle init: pose={best_pp.pose_name!r} "
-                f"fitness={best_pp.fitness:.3f}",
-                file=sys.stderr,
-            )
-        else:
-            T_init = multi.T
+        T_init = _resolve_bundle_init(args, multi)
 
         cad_arrays = [np.asarray(p[1].points, dtype=np.float64) for p in pairs]
         arm_clouds = [p[2] for p in pairs]
@@ -744,6 +801,8 @@ def cmd_smoke(args: argparse.Namespace) -> int:
         optimize_joints=args.optimize_joints,
         joint_offset_bound=args.joint_offset_bound,
         home_offset=args.home_offset,
+        init_from=None,
+        init_from_dir=None,
     )
     try:
         rc = cmd_register_multi(reg_args)
@@ -954,17 +1013,22 @@ def cmd_set_home(args: argparse.Namespace) -> int:
     return 0
 
 
-def _load_home_offset(path: str | None) -> dict[str, float]:
+def _load_home_offset(
+    path: str | None, *, auto_discover: bool = True
+) -> dict[str, float]:
     """Load home offset JSON.
 
-    When ``path`` is None, auto-discovers from the user config dir
-    (``$XDG_CONFIG_HOME/isaac-auto-scene/home_offset.json`` or
+    When ``path`` is None and ``auto_discover`` is True, looks for
+    ``$XDG_CONFIG_HOME/isaac-auto-scene/home_offset.json`` (or
     ``~/.config/isaac-auto-scene/home_offset.json``).  Returns an empty
-    dict only when no file is supplied and the default isn't present.
+    dict only when no file is supplied and (the default isn't present
+    or auto-discover is disabled).
     """
     import json
 
     if path is None:
+        if not auto_discover:
+            return {}
         default_path = _default_home_offset_path()
         if default_path.exists():
             path = str(default_path)
@@ -1438,6 +1502,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=200,
         help="scipy.optimize.least_squares max function-eval budget for "
         "the bundle solver.",
+    )
+    prm.add_argument(
+        "--init-from",
+        default=None,
+        help="Bundle init from this calib.json (overrides best per-pose).",
+    )
+    prm.add_argument(
+        "--init-from-dir",
+        default=None,
+        help="Bundle init from the (fitness-weighted) mean of every "
+        "calib_*.json in this directory.  Use with manual-align-all "
+        "output, e.g. ~/.config/isaac-auto-scene/manual-calibs.",
     )
     prm.set_defaults(func=cmd_register_multi)
 
