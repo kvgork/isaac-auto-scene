@@ -44,6 +44,40 @@ def _pcd_from_np(pts):
     return p
 
 
+def _dump_per_pose_debug(
+    out_dir: str,
+    pairs: list,
+    T_cam_arm: np.ndarray,
+    *,
+    urdf,
+    manifest_poses,
+) -> None:
+    """Write per-pose `cad_<name>.ply` (in camera frame, post calib T) and
+    `arm_<name>.ply` (segmented capture) to ``out_dir``.
+
+    Pair them up in a viewer (MeshLab / Open3D viewer / Isaac Sim) to
+    visually diagnose where the bundle T fits well and where it drifts.
+    """
+    import open3d as o3d
+
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    R = T_cam_arm[:3, :3]
+    t = T_cam_arm[:3, 3]
+    np.save(out / "T_cam_arm.npy", T_cam_arm)
+    for (name, cad_pcd, arm_pcd), rec in zip(pairs, manifest_poses):
+        cad_local = np.asarray(cad_pcd.points)
+        cad_cam = cad_local @ R.T + t
+        cad_out = o3d.geometry.PointCloud()
+        cad_out.points = o3d.utility.Vector3dVector(cad_cam)
+        cad_out.paint_uniform_color((1.0, 0.2, 0.2))  # red: predicted
+        arm_out = o3d.geometry.PointCloud(arm_pcd)
+        arm_out.paint_uniform_color((0.2, 1.0, 0.2))  # green: observed
+        o3d.io.write_point_cloud(str(out / f"cad_{name}.ply"), cad_out)
+        o3d.io.write_point_cloud(str(out / f"arm_{name}.ply"), arm_out)
+    print(f"[debug] dumped per-pose PLY pairs to {out}/", file=sys.stderr)
+
+
 def _resolve_fallback(args: argparse.Namespace):
     """Return the fallback registration callable specified by --fallback, or None."""
     name = getattr(args, "fallback", None) or "none"
@@ -372,6 +406,15 @@ def cmd_register_multi(args: argparse.Namespace) -> int:
     calib = build_calibration(last_cap, last_cad, synthetic_reg)
     save_calibration(calib, Path(args.out))
 
+    if getattr(args, "dump_debug", None):
+        _dump_per_pose_debug(
+            args.dump_debug,
+            pairs,
+            multi.T,
+            urdf=urdf,
+            manifest_poses=[r for r in manifest.poses if r.status == "ok"],
+        )
+
     print(
         f"multi-pose calib -> {args.out}  "
         f"({multi.n_accepted}/{multi.n_total} accepted, "
@@ -611,6 +654,89 @@ def cmd_smoke(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_manual_align(args: argparse.Namespace) -> int:
+    """Interactive viewer for manual CAD-over-arm alignment.
+
+    Opens a window with the segmented arm cloud (green) + URDF-FK CAD
+    (red) for one pose.  User drives the CAD with keyboard until happy,
+    then ENTER writes calib.json.
+    """
+    from isaac_auto_scene.capture_multi import load_manifest, load_pose_capture
+    from isaac_auto_scene.manual_align import run_manual_align
+    from isaac_auto_scene.register import RegistrationResult
+    from isaac_auto_scene.segment import segment_table_arm
+
+    manifest = load_manifest(Path(args.captures))
+    matching = [r for r in manifest.poses if r.name == args.pose and r.status == "ok"]
+    if not matching:
+        print(
+            f"ERROR: pose {args.pose!r} not found (or not ok) in manifest. "
+            f"Available: {[r.name for r in manifest.poses]}",
+            file=sys.stderr,
+        )
+        return 1
+    rec = matching[0]
+    cap = load_pose_capture(Path(args.captures), rec)
+
+    urdf = load_urdf(args.urdf)
+    cad = assemble_pcd(urdf, rec.readback_joints, target_n_points=args.target_n_points)
+
+    seg = segment_table_arm(
+        cap.pcd,
+        workspace_z_max_m=args.workspace_z_max,
+        workspace_z_min_m=args.workspace_z_min,
+        expected_up=_parse_expected_up(args.expected_up),
+        up_tolerance_deg=args.up_tol_deg,
+        arm_merge_radius_m=args.arm_merge_radius,
+        outlier_nb_neighbors=args.outlier_neighbors,
+        outlier_std_ratio=args.outlier_std,
+    )
+
+    T_init = np.eye(4)
+    if args.init_from:
+        from isaac_auto_scene.calibrate import load_calibration
+
+        prev = load_calibration(args.init_from)
+        T_init[:3, 3] = prev.translation_m
+        # Build rotation from quat_xyzw (Shepperd).
+        x, y, z, w = prev.quat_xyzw
+        T_init[:3, :3] = np.array(
+            [
+                [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+            ]
+        )
+
+    T_final = run_manual_align(
+        cad.points,
+        seg.arm_cloud,
+        T_init=T_init,
+        step_m=args.step,
+        rot_step_deg=args.rot_step,
+        icp_threshold_m=args.icp_threshold,
+    )
+    if T_final is None:
+        print("[manual-align] window closed without confirmation, no calib written")
+        return 2
+
+    # Wrap final T as a RegistrationResult so build_calibration packages
+    # the camera intrinsics + quaternion the same way as the automated path.
+    from isaac_auto_scene.calibrate import build_calibration, save_calibration
+
+    synth_reg = RegistrationResult(
+        T=T_final,
+        fitness=1.0,
+        inlier_rmse_m=0.0,
+        used_fallback=True,
+        n_restarts=0,
+    )
+    calib = build_calibration(cap, cad, synth_reg)
+    save_calibration(calib, Path(args.out))
+    print(f"manual-align calib -> {args.out}")
+    return 0
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
     """Forward-projection residual report from calib.json + scene.usd."""
     calib = load_calibration(args.calib)
@@ -787,6 +913,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="±rad bound on each joint offset (default 0.35 ≈ ±20°).",
     )
     prm.add_argument(
+        "--dump-debug",
+        default=None,
+        help="Output dir for per-pose PLY pairs (cad_<name>.ply + "
+        "arm_<name>.ply, colour-coded red/green). Open with MeshLab or "
+        "Open3D viewer to inspect fit per pose.",
+    )
+    prm.add_argument(
         "--bundle-inlier-distance",
         type=float,
         default=0.02,
@@ -832,6 +965,46 @@ def build_parser() -> argparse.ArgumentParser:
         "frames out (default 60 = ~1 s @ 60 Hz)",
     )
     pr.set_defaults(func=cmd_render)
+
+    pma = sub.add_parser(
+        "manual-align",
+        help="interactive viewer to manually align CAD over a captured arm cloud",
+    )
+    pma.add_argument("--captures", required=True, help="capture run directory")
+    pma.add_argument("--urdf", required=True)
+    pma.add_argument(
+        "--pose",
+        required=True,
+        help="pose name to align (must match a row in captures/manifest.yaml)",
+    )
+    pma.add_argument("--out", default="calib.json")
+    pma.add_argument(
+        "--init-from",
+        default=None,
+        help="optional starting calib.json to seed the alignment",
+    )
+    pma.add_argument("--target-n-points", type=int, default=8000)
+    pma.add_argument(
+        "--step", type=float, default=0.01, help="translation step in metres"
+    )
+    pma.add_argument(
+        "--rot-step", type=float, default=5.0, help="rotation step in degrees"
+    )
+    pma.add_argument(
+        "--icp-threshold",
+        type=float,
+        default=0.02,
+        help="SPACE-key ICP snap correspondence threshold (m)",
+    )
+    # Segmentation knobs (mirror register-multi).
+    pma.add_argument("--workspace-z-max", type=float, default=None)
+    pma.add_argument("--workspace-z-min", type=float, default=None)
+    pma.add_argument("--expected-up", default=None)
+    pma.add_argument("--up-tol-deg", type=float, default=30.0)
+    pma.add_argument("--arm-merge-radius", type=float, default=0.0)
+    pma.add_argument("--outlier-neighbors", type=int, default=0)
+    pma.add_argument("--outlier-std", type=float, default=2.0)
+    pma.set_defaults(func=cmd_manual_align)
 
     pv = sub.add_parser("validate", help="forward-projection residual report")
     pv.add_argument("--calib", required=True)
