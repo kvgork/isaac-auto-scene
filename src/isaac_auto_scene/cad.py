@@ -125,9 +125,31 @@ def _resolve_mesh_path(urdf: yourdfpy.URDF, fname: str) -> Path | None:
     candidate = Path(fname)
     if candidate.is_absolute() and candidate.exists():
         return candidate
-    urdf_dir = Path(getattr(urdf, "_filename", "")).parent
-    rel = urdf_dir / fname
-    return rel if rel.exists() else None
+    urdf_dir = _urdf_directory(urdf)
+    if urdf_dir is not None:
+        rel = urdf_dir / fname
+        if rel.exists():
+            return rel
+    return None
+
+
+def _urdf_directory(urdf: yourdfpy.URDF) -> Path | None:
+    """Return the directory the URDF was loaded from, or None.
+
+    yourdfpy doesn't expose the source path directly on the URDF instance;
+    it stashes a ``functools.partial`` filename handler with the directory
+    baked in via ``keywords["dir"]``.  Older builds exposed ``_filename``
+    on the URDF directly — check both.
+    """
+    direct = getattr(urdf, "_filename", None)
+    if direct:
+        return Path(direct).parent
+    handler = getattr(urdf, "_filename_handler", None)
+    if handler is not None and hasattr(handler, "keywords"):
+        d = handler.keywords.get("dir")
+        if d:
+            return Path(d)
+    return None
 
 
 def assemble_pcd(
