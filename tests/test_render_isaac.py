@@ -18,6 +18,34 @@ from tests.fixtures.minimal_urdf import write_minimal_urdf
 
 ISAAC_PY = Path.home() / "workspaces/lerobot-isaac-training/.pixi/envs/sim/bin/python"
 
+# Render-product allocation OOMs silently when free VRAM is below this
+# budget — see scripts/render_isaac_scene.py for the matching pre-flight.
+_MIN_FREE_VRAM_MB = 1500
+_MIN_FREE_VRAM_MB_ROS2 = 2500
+
+
+def _free_vram_mb() -> int | None:
+    """Return free VRAM in MiB on GPU 0, or None when nvidia-smi is missing."""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits", "-i", "0"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+        return int(out.stdout.strip().splitlines()[0])
+    except (subprocess.SubprocessError, FileNotFoundError, ValueError, IndexError):
+        return None
+
+
+def _skip_if_low_vram(budget_mb: int) -> None:
+    free = _free_vram_mb()
+    if free is not None and free < budget_mb:
+        pytest.skip(
+            f"insufficient GPU memory: {free} MiB free, need >= {budget_mb} MiB"
+        )
+
 
 @pytest.mark.hardware
 @pytest.mark.skipif(
@@ -26,6 +54,7 @@ ISAAC_PY = Path.home() / "workspaces/lerobot-isaac-training/.pixi/envs/sim/bin/p
 )
 def test_render_with_ros2_bridge(tmp_path: Path) -> None:
     """Smoke: --ros2 flag attaches the publisher graph and render still succeeds."""
+    _skip_if_low_vram(_MIN_FREE_VRAM_MB_ROS2)
     urdf = write_minimal_urdf(tmp_path)
     calib_path = tmp_path / "calib.json"
     frame_path = tmp_path / "frame.png"
@@ -61,6 +90,7 @@ def test_render_with_ros2_bridge(tmp_path: Path) -> None:
     reason=f"Isaac Sim Python not found at {ISAAC_PY}",
 )
 def test_render_produces_png(tmp_path: Path) -> None:
+    _skip_if_low_vram(_MIN_FREE_VRAM_MB)
     urdf = write_minimal_urdf(tmp_path)
     calib_path = tmp_path / "calib.json"
     frame_path = tmp_path / "frame.png"

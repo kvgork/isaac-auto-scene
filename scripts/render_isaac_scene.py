@@ -23,6 +23,31 @@ import sys
 from pathlib import Path
 
 
+def _query_free_vram_mb() -> int | None:
+    """Return free VRAM in MiB on GPU 0, or None if nvidia-smi is unavailable."""
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits", "-i", "0"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+        return int(out.stdout.strip().splitlines()[0])
+    except (subprocess.SubprocessError, FileNotFoundError, ValueError, IndexError):
+        return None
+
+
+# Minimum free VRAM (MiB) required for the headless render product to
+# allocate its colour + depth buffers without ERROR_OUT_OF_DEVICE_MEMORY.
+# With --ros2 the OmniGraph adds RGB + depth + PCL + camera_info publisher
+# render-targets, so the budget roughly doubles.
+MIN_FREE_VRAM_MB = 1500
+MIN_FREE_VRAM_MB_ROS2 = 2500
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--calib", required=True, help="path to calib.json")
@@ -51,6 +76,22 @@ def main() -> int:
     # Force headless + cameras on regardless of CLI defaults
     args.headless = True
     args.enable_cameras = True
+
+    # Pre-flight VRAM check. ERROR_OUT_OF_DEVICE_MEMORY inside Vulkan during
+    # render-product allocation produces a silent retry loop (no rgb buffer
+    # ever populates, the warmup loop completes without an exception).
+    # Catch it before AppLauncher boots so we exit cleanly instead of hanging.
+    free_mb = _query_free_vram_mb()
+    if free_mb is not None:
+        budget = MIN_FREE_VRAM_MB_ROS2 if args.ros2 else MIN_FREE_VRAM_MB
+        if free_mb < budget:
+            print(
+                f"ERROR: insufficient GPU memory: {free_mb} MiB free, need >= "
+                f"{budget} MiB ({'with --ros2' if args.ros2 else 'baseline'}). "
+                "Stop competing GPU workloads (check `nvidia-smi --query-compute-apps`).",
+                file=sys.stderr,
+            )
+            return 1
 
     app_launcher = AppLauncher(args)
     simulation_app = app_launcher.app  # noqa: F841
