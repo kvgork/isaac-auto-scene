@@ -101,6 +101,7 @@ def test_smoke_mock_capture_and_register(tmp_path: Path) -> None:
         bundle_max_nfev=200,
         optimize_joints=None,
         joint_offset_bound=0.35,
+        home_offset=None,
     )
     try:
         rc = cmd_register_multi(reg_args)

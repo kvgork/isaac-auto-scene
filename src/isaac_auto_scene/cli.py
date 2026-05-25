@@ -231,8 +231,11 @@ def cmd_register_multi(args: argparse.Namespace) -> int:
             outlier_nb_neighbors=args.outlier_neighbors,
             outlier_std_ratio=args.outlier_std,
         )
+        joints_urdf = _apply_home_offset(
+            dict(record.readback_joints), _load_home_offset(getattr(args, "home_offset", None))
+        )
         cad = assemble_pcd(
-            urdf, record.readback_joints, target_n_points=args.target_n_points
+            urdf, joints_urdf, target_n_points=args.target_n_points
         )
         pairs.append((record.name, _pcd_from_np(cad.points), seg.arm_cloud))
         last_cap = cap
@@ -612,6 +615,7 @@ def cmd_smoke(args: argparse.Namespace) -> int:
         bundle_max_nfev=args.bundle_max_nfev,
         optimize_joints=args.optimize_joints,
         joint_offset_bound=args.joint_offset_bound,
+        home_offset=args.home_offset,
     )
     try:
         rc = cmd_register_multi(reg_args)
@@ -736,6 +740,103 @@ def _offline_capture_for_manual_align(args: argparse.Namespace):
     return cap, dict(rec.readback_joints)
 
 
+def cmd_calibrate_arm(args: argparse.Namespace) -> int:
+    """Run LeRobot's interactive calibration on the SO-101 follower.
+
+    Wraps ``SO101Follower.connect(calibrate=True)`` so users don't need to
+    remember the LeRobot module path.  After calibration completes the
+    driver disconnects cleanly and the calibration JSON is in LeRobot's
+    cache (typically ``~/.cache/huggingface/lerobot/calibration/...``).
+    """
+    from isaac_auto_scene.lerobot_arm import LeRobotSO101Config, LeRobotSO101Driver
+
+    driver = LeRobotSO101Driver(
+        config=LeRobotSO101Config(port=args.arm_port, calibrate=True)
+    )
+    print(
+        f"[calibrate-arm] connecting to {args.arm_port} with calibrate=True. "
+        f"Follow the prompts on LeRobot's calibration walkthrough.",
+        file=sys.stderr,
+    )
+    try:
+        driver.connect()
+    except Exception as exc:
+        print(f"ERROR: calibration failed: {exc}", file=sys.stderr)
+        return 1
+    driver.disconnect()
+    print("[calibrate-arm] calibration done. Now use 'set-home' with the arm")
+    print("                 physically placed in the URDF home pose.")
+    return 0
+
+
+def cmd_set_home(args: argparse.Namespace) -> int:
+    """Capture current arm joint readback and save it as the home-offset JSON.
+
+    Physically place the arm in the URDF home pose (all links straight,
+    extended forward — what `assemble_pcd(urdf, all_zeros)` predicts),
+    then run this command.  The captured readback is then subtracted
+    from any future readback before it's handed to URDF FK, so the
+    LeRobot servo zero is aligned with the URDF joint zero.
+
+    Output JSON schema::
+        {"home_offset_rad": {"shoulder_pan": 0.0, ...}, "captured_at": "..."}
+    """
+    import json
+    import time
+
+    from isaac_auto_scene.lerobot_arm import LeRobotSO101Config, LeRobotSO101Driver
+
+    urdf = load_urdf(args.urdf)
+    driver = LeRobotSO101Driver(
+        config=LeRobotSO101Config(port=args.arm_port, calibrate=False)
+    )
+    print(f"[set-home] reading arm joints from {args.arm_port}...", file=sys.stderr)
+    with driver as drv:
+        joints = drv.read_joints()
+    _print_joint_readback(joints, urdf)
+    home_offset = {k: float(v) for k, v in joints.items()}
+
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
+        json.dumps(
+            {
+                "home_offset_rad": home_offset,
+                "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "port": args.arm_port,
+                "note": (
+                    "Subtract these values from any subsequent LeRobot "
+                    "readback before passing joints to URDF FK. The arm "
+                    "was physically in the URDF home pose when this file "
+                    "was written."
+                ),
+            },
+            indent=2,
+        )
+    )
+    print(f"[set-home] wrote home offset -> {out_path}")
+    return 0
+
+
+def _load_home_offset(path: str | None) -> dict[str, float]:
+    """Load home offset JSON (or return empty dict when None)."""
+    if path is None:
+        return {}
+    import json
+
+    data = json.loads(Path(path).read_text())
+    return {k: float(v) for k, v in data.get("home_offset_rad", {}).items()}
+
+
+def _apply_home_offset(
+    joints: dict[str, float], home: dict[str, float]
+) -> dict[str, float]:
+    """Subtract home-offset from readback so it aligns with URDF zero."""
+    if not home:
+        return dict(joints)
+    return {k: float(v) - float(home.get(k, 0.0)) for k, v in joints.items()}
+
+
 def cmd_manual_align(args: argparse.Namespace) -> int:
     """Interactive viewer for manual CAD-over-arm alignment.
 
@@ -760,7 +861,15 @@ def cmd_manual_align(args: argparse.Namespace) -> int:
         if cap is None:
             return 1
 
-    cad = assemble_pcd(urdf, joints, target_n_points=args.target_n_points)
+    home_offset = _load_home_offset(args.home_offset)
+    if home_offset:
+        print(
+            f"[manual-align] applying home offset from {args.home_offset}: "
+            f"{ {k: round(v, 3) for k, v in home_offset.items()} }",
+            file=sys.stderr,
+        )
+    joints_urdf = _apply_home_offset(joints, home_offset)
+    cad = assemble_pcd(urdf, joints_urdf, target_n_points=args.target_n_points)
 
     seg = segment_table_arm(
         cap.pcd,
@@ -1001,6 +1110,12 @@ def build_parser() -> argparse.ArgumentParser:
         "Open3D viewer to inspect fit per pose.",
     )
     prm.add_argument(
+        "--home-offset",
+        default=None,
+        help="JSON from `set-home`; subtracted from each pose's readback "
+        "before URDF FK.",
+    )
+    prm.add_argument(
         "--bundle-inlier-distance",
         type=float,
         default=0.02,
@@ -1047,6 +1162,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pr.set_defaults(func=cmd_render)
 
+    pca = sub.add_parser(
+        "calibrate-arm",
+        help="run LeRobot's interactive calibration on the SO-101 follower",
+    )
+    pca.add_argument("--arm-port", default="/dev/ttyACM0")
+    pca.set_defaults(func=cmd_calibrate_arm)
+
+    psh = sub.add_parser(
+        "set-home",
+        help="capture current arm joint readback as the URDF-home offset",
+    )
+    psh.add_argument("--urdf", required=True)
+    psh.add_argument("--arm-port", default="/dev/ttyACM0")
+    psh.add_argument(
+        "--out",
+        default="assets/home_offset.json",
+        help="output JSON (default assets/home_offset.json)",
+    )
+    psh.set_defaults(func=cmd_set_home)
+
     pma = sub.add_parser(
         "manual-align",
         help="interactive viewer to manually align CAD over a captured arm cloud",
@@ -1082,6 +1217,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pma.add_argument("--mock-arm", action="store_true")
     pma.add_argument("--mock-cam", action="store_true")
+    pma.add_argument(
+        "--home-offset",
+        default=None,
+        help="JSON from `set-home` (subtract its joints from any readback "
+        "before passing to URDF FK so LeRobot zero = URDF zero).",
+    )
     pma.add_argument("--out", default="calib.json")
     pma.add_argument(
         "--init-from",
@@ -1205,6 +1346,7 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--bundle-max-nfev", type=int, default=200)
     ps.add_argument("--optimize-joints", default=None)
     ps.add_argument("--joint-offset-bound", type=float, default=0.35)
+    ps.add_argument("--home-offset", default=None)
     ps.set_defaults(func=cmd_smoke)
 
     return p
