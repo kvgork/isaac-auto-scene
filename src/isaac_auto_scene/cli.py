@@ -44,6 +44,18 @@ def _pcd_from_np(pts):
     return p
 
 
+def _parse_expected_up(value: str | None) -> tuple[float, float, float] | None:
+    """Parse '--expected-up x,y,z' (or None) into a 3-tuple."""
+    if value is None or value == "":
+        return None
+    parts = [p.strip() for p in value.split(",")]
+    if len(parts) != 3:
+        raise ValueError(
+            f"--expected-up must be 'x,y,z' (got {value!r})"
+        )
+    return (float(parts[0]), float(parts[1]), float(parts[2]))
+
+
 def cmd_calibrate(args: argparse.Namespace) -> int:
     """capture -> segment -> register -> calib.json."""
     if args.mock:
@@ -155,7 +167,14 @@ def cmd_register_multi(args: argparse.Namespace) -> int:
         cap = load_pose_capture(manifest_dir, record)
         from isaac_auto_scene.segment import segment_table_arm
 
-        seg = segment_table_arm(cap.pcd)
+        seg = segment_table_arm(
+            cap.pcd,
+            workspace_z_max_m=args.workspace_z_max,
+            workspace_z_min_m=args.workspace_z_min,
+            expected_up=_parse_expected_up(args.expected_up),
+            up_tolerance_deg=args.up_tol_deg,
+            arm_merge_radius_m=args.arm_merge_radius,
+        )
         cad = assemble_pcd(
             urdf, record.readback_joints, target_n_points=args.target_n_points
         )
@@ -372,6 +391,11 @@ def cmd_smoke(args: argparse.Namespace) -> int:
         restarts=5,
         target_n_points=15_000,
         min_accepted=max(1, len(yaml.safe_load(Path(args.poses).read_text())["poses"]) // 2),
+        workspace_z_max=args.workspace_z_max,
+        workspace_z_min=args.workspace_z_min,
+        expected_up=args.expected_up,
+        up_tol_deg=args.up_tol_deg,
+        arm_merge_radius=args.arm_merge_radius,
     )
     try:
         rc = cmd_register_multi(reg_args)
@@ -493,6 +517,42 @@ def build_parser() -> argparse.ArgumentParser:
     prm.add_argument("--restarts", type=int, default=5)
     prm.add_argument("--target-n-points", type=int, default=15_000)
     prm.add_argument("--min-accepted", type=int, default=2)
+    prm.add_argument(
+        "--workspace-z-max",
+        type=float,
+        default=None,
+        help="Drop points beyond this Z (metres, camera frame) before "
+        "plane fit. Use to suppress background walls.",
+    )
+    prm.add_argument(
+        "--workspace-z-min",
+        type=float,
+        default=None,
+        help="Drop points closer than this Z (metres). E.g. 0.15 to ignore "
+        "noise just in front of the lens.",
+    )
+    prm.add_argument(
+        "--expected-up",
+        default=None,
+        help="Expected table normal in camera frame as 'x,y,z' (e.g. "
+        "'0,-1,0' for a level D435 looking forward at a table). When set, "
+        "RANSAC planes within --up-tol-deg of this direction are preferred "
+        "over the largest plane.",
+    )
+    prm.add_argument(
+        "--up-tol-deg",
+        type=float,
+        default=30.0,
+        help="Angular tolerance (deg) for --expected-up (default 30).",
+    )
+    prm.add_argument(
+        "--arm-merge-radius",
+        type=float,
+        default=0.0,
+        help="Merge DBSCAN clusters within this radius (m) of the largest "
+        "into the arm cloud. Use ~0.30 for SO-101 to capture base + "
+        "forearm when joints split them across clusters. Default 0 = off.",
+    )
     prm.set_defaults(func=cmd_register_multi)
 
     pg = sub.add_parser("generate", help="calib.json -> scene.usd")
@@ -547,6 +607,36 @@ def build_parser() -> argparse.ArgumentParser:
         "--arm-port",
         default="/dev/ttyACM0",
         help="serial port for the SO-101 follower (ignored when --mock)",
+    )
+    ps.add_argument(
+        "--workspace-z-max",
+        type=float,
+        default=None,
+        help="Drop points beyond this Z (metres) before plane fit.",
+    )
+    ps.add_argument(
+        "--workspace-z-min",
+        type=float,
+        default=None,
+        help="Drop points closer than this Z before plane fit.",
+    )
+    ps.add_argument(
+        "--expected-up",
+        default=None,
+        help="Expected table normal in camera frame as 'x,y,z'.",
+    )
+    ps.add_argument(
+        "--up-tol-deg",
+        type=float,
+        default=30.0,
+        help="Angular tolerance (deg) for --expected-up.",
+    )
+    ps.add_argument(
+        "--arm-merge-radius",
+        type=float,
+        default=0.0,
+        help="Merge DBSCAN clusters within this radius (m) of the largest "
+        "into the arm cloud (0 = off).",
     )
     ps.set_defaults(func=cmd_smoke)
 

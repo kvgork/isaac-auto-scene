@@ -86,6 +86,11 @@ def test_smoke_mock_capture_and_register(tmp_path: Path) -> None:
         restarts=2,
         target_n_points=2_000,
         min_accepted=1,
+        workspace_z_max=None,
+        workspace_z_min=None,
+        expected_up=None,
+        up_tol_deg=30.0,
+        arm_merge_radius=0.0,
     )
     try:
         rc = cmd_register_multi(reg_args)
