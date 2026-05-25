@@ -214,20 +214,55 @@ def _parse_expected_up(value: str | None) -> tuple[float, float, float] | None:
 
 
 def cmd_calibrate(args: argparse.Namespace) -> int:
-    """capture -> segment -> register -> calib.json."""
+    """capture -> segment -> register -> calib.json.
+
+    With ``--live`` the joints are read from the live SO-101 follower
+    (after sign-flip + home-offset normalisation) instead of using
+    ``--joints``.  Useful for one-shot auto-align at the current
+    physical arm pose.
+    """
     if args.mock:
         source = MockD435Source(seed=args.seed)
     else:  # pragma: no cover - hardware path
         from isaac_auto_scene.realsense_source import RealSenseD435Source
         source = RealSenseD435Source()
 
+    urdf = load_urdf(args.urdf)
+
+    live_joints: dict[str, float] | None = None
+    if args.live:
+        driver = _build_lerobot_driver(args)
+        with driver as drv:
+            raw = drv.read_joints()
+        live_joints = _apply_home_offset(
+            dict(raw), _load_home_offset(getattr(args, "home_offset", None))
+        )
+        print(
+            f"[calibrate live] joints (urdf, rad): "
+            f"{{ {', '.join(f'{k}={v:+.3f}' for k, v in live_joints.items())} }}",
+            flush=True,
+        )
+
     with source as src:
         cap = capture(source=src, num_frames=args.frames)
 
-    seg = segment_table_arm(cap.pcd)
+    seg = segment_table_arm(
+        cap.pcd,
+        workspace_z_max_m=args.workspace_z_max,
+        workspace_z_min_m=args.workspace_z_min,
+        expected_up=_parse_expected_up(args.expected_up),
+        up_tolerance_deg=args.up_tol_deg,
+        arm_merge_radius_m=args.arm_merge_radius,
+        outlier_nb_neighbors=args.outlier_neighbors,
+        outlier_std_ratio=args.outlier_std,
+    )
 
-    urdf = load_urdf(args.urdf)
-    joint_angles = json.loads(args.joints) if args.joints else None
+    if live_joints is not None:
+        joint_angles = live_joints
+    elif args.joints:
+        joint_angles = json.loads(args.joints)
+    else:
+        joint_angles = None
     cad = assemble_pcd(urdf, joint_angles, target_n_points=args.target_n_points)
 
     cad_pcd = _pcd_from_np(cad.points)
@@ -1345,15 +1380,35 @@ def build_parser() -> argparse.ArgumentParser:
 
     pc = sub.add_parser("calibrate", help="capture -> segment -> register")
     pc.add_argument("--urdf", required=True, help="path to SO-101 URDF")
-    pc.add_argument("--out", default="calib.json", help="output calib.json path")
+    pc.add_argument(
+        "--out",
+        default=str(_default_calib_path()),
+        help=f"output calib.json (default {_default_calib_path()})",
+    )
     pc.add_argument("--mock", action="store_true", help="use MockD435Source")
     pc.add_argument("--seed", type=int, default=0)
     pc.add_argument("--frames", type=int, default=30)
     pc.add_argument("--joints", default=None, help="JSON dict of joint angles")
+    pc.add_argument(
+        "--live",
+        action="store_true",
+        help="read current joints from the live SO-101 (with sign-flip + "
+        "home-offset auto-applied) instead of --joints / all-zeros.",
+    )
+    pc.add_argument("--arm-port", default="/dev/ttyACM0")
+    pc.add_argument("--home-offset", default=None)
     pc.add_argument("--voxel", type=float, default=0.005)
     pc.add_argument("--restarts", type=int, default=5)
     pc.add_argument("--target-n-points", type=int, default=15_000)
     pc.add_argument("--dump-pcds", default=None, help="optional out dir for capture artefacts")
+    # Segmentation knobs (mirror register-multi/manual-align).
+    pc.add_argument("--workspace-z-max", type=float, default=None)
+    pc.add_argument("--workspace-z-min", type=float, default=None)
+    pc.add_argument("--expected-up", default=None)
+    pc.add_argument("--up-tol-deg", type=float, default=30.0)
+    pc.add_argument("--arm-merge-radius", type=float, default=0.0)
+    pc.add_argument("--outlier-neighbors", type=int, default=0)
+    pc.add_argument("--outlier-std", type=float, default=2.0)
     pc.set_defaults(func=cmd_calibrate)
 
     pcp = sub.add_parser(
