@@ -1,0 +1,70 @@
+# 5-pose diverse set for the isaac-auto-scene hardware smoke.
+#
+# Poses spread across shoulder_pan / shoulder_lift / elbow_flex / wrist_roll
+# so the arm appearance differs enough for multi-pose ICP to converge on a
+# unique camera->arm transform. The ±15° single-joint set was too small —
+# ICP fitness stayed under the 0.65 gate on every pose.
+#
+# Joint names match so101_new_calib.urdf. Angles in RADIANS (driver
+# converts to degrees on the Feetech wire).
+#
+# Conservative envelope:
+#   shoulder_pan   ±0.50 rad (~29°)
+#   shoulder_lift  -0.10 to +0.60 rad  (avoid the arm slumping into table)
+#   elbow_flex     0 to +0.80 rad      (forearm folds upward only)
+#   wrist_flex     -0.40 to +0.40 rad
+#   wrist_roll     -0.80 to +0.80 rad
+#   gripper        0.0 (closed/at-rest)
+#
+# Tune upward once visual confirmation shows the arm clears the workspace.
+
+poses:
+  - name: home
+    joints:
+      shoulder_pan: 0.0
+      shoulder_lift: 0.0
+      elbow_flex: 0.0
+      wrist_flex: 0.0
+      wrist_roll: 0.0
+      gripper: 0.0
+    settle_s: 1.5
+
+  - name: arm_up
+    joints:
+      shoulder_pan: 0.0
+      shoulder_lift: 0.60        # ~34° lift
+      elbow_flex: 0.40           # ~23° fold
+      wrist_flex: 0.0
+      wrist_roll: 0.0
+      gripper: 0.0
+    settle_s: 1.5
+
+  - name: pan_left_elbow
+    joints:
+      shoulder_pan: 0.50         # ~29° CCW
+      shoulder_lift: 0.30
+      elbow_flex: 0.70           # ~40° fold
+      wrist_flex: 0.20
+      wrist_roll: 0.0
+      gripper: 0.0
+    settle_s: 1.5
+
+  - name: pan_right_twist
+    joints:
+      shoulder_pan: -0.50        # ~-29° CW
+      shoulder_lift: 0.30
+      elbow_flex: 0.50
+      wrist_flex: -0.20
+      wrist_roll: 0.80           # ~46° wrist twist
+      gripper: 0.0
+    settle_s: 1.5
+
+  - name: wrist_pose
+    joints:
+      shoulder_pan: 0.0
+      shoulder_lift: 0.40
+      elbow_flex: 0.80           # ~46° fold (compact tuck)
+      wrist_flex: 0.40
+      wrist_roll: -0.80
+      gripper: 0.0
+    settle_s: 1.5
