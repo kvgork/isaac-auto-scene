@@ -24,7 +24,7 @@ poses:
       wrist_flex: 0.0
       wrist_roll: 0.0
       gripper: 0.0
-    settle_s: 1.5
+    settle_s: 3.0
 
   - name: pan_left
     joints:
@@ -34,7 +34,7 @@ poses:
       wrist_flex: 0.0
       wrist_roll: 0.0
       gripper: 0.0
-    settle_s: 1.5
+    settle_s: 3.0
 
   - name: pan_right
     joints:
@@ -44,7 +44,7 @@ poses:
       wrist_flex: 0.0
       wrist_roll: 0.0
       gripper: 0.0
-    settle_s: 1.5
+    settle_s: 3.0
 
   - name: lift_up
     joints:
@@ -54,7 +54,7 @@ poses:
       wrist_flex: 0.0
       wrist_roll: 0.0
       gripper: 0.0
-    settle_s: 1.5
+    settle_s: 3.0
 
   - name: fold_in
     joints:
@@ -64,4 +64,4 @@ poses:
       wrist_flex: 0.0
       wrist_roll: 0.0
       gripper: 0.0
-    settle_s: 1.5
+    settle_s: 3.0

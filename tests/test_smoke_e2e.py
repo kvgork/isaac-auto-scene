@@ -75,6 +75,7 @@ def test_smoke_mock_capture_and_register(tmp_path: Path) -> None:
         check_floor=False,
         floor_z=-0.005,
         home_offset=None,
+        settle_s=0.0,
     )
     rc = cmd_capture_poses(capture_args)
     assert rc == 0

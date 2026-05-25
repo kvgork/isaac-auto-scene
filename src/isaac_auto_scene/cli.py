@@ -195,6 +195,7 @@ def cmd_capture_poses(args: argparse.Namespace) -> int:
             home_offset_rad=_load_home_offset(args.home_offset)
             if args.home_offset
             else None,
+            settle_s_override=args.settle_s if args.settle_s > 0 else None,
         )
 
     print(
@@ -639,6 +640,7 @@ def cmd_smoke(args: argparse.Namespace) -> int:
         check_floor=getattr(args, "check_floor", False),
         floor_z=getattr(args, "floor_z", -0.005),
         home_offset=getattr(args, "home_offset", None),
+        settle_s=getattr(args, "settle_s", 0.0),
     )
     rc = cmd_capture_poses(capture_args)
     if rc != 0:
@@ -1076,6 +1078,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="JSON from `set-home`; pose angles are evaluated in URDF "
         "coords (raw - offset) for the --check-floor pre-flight.",
     )
+    pcp.add_argument(
+        "--settle-s",
+        type=float,
+        default=0.0,
+        help="override per-pose settle time in seconds (default 0 = use "
+        "the YAML's settle_s).  Set to e.g. 3.0 to wait longer between "
+        "poses so the arm stops swinging before each capture.",
+    )
     pcp.set_defaults(func=cmd_capture_poses)
 
     prm = sub.add_parser(
@@ -1449,6 +1459,12 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--home-offset", default=None)
     ps.add_argument("--check-floor", action="store_true")
     ps.add_argument("--floor-z", type=float, default=-0.005)
+    ps.add_argument(
+        "--settle-s",
+        type=float,
+        default=0.0,
+        help="override per-pose settle time (0 = use YAML's settle_s)",
+    )
     ps.set_defaults(func=cmd_smoke)
 
     return p

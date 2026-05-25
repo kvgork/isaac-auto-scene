@@ -112,6 +112,7 @@ def capture_pose_set(
     check_floor: bool = False,
     floor_z_m: float = -0.005,
     home_offset_rad: dict[str, float] | None = None,
+    settle_s_override: float | None = None,
 ) -> MultiCaptureManifest:
     """Drive *driver* through *poses* and capture RGB-D per pose.
 
@@ -171,6 +172,12 @@ def capture_pose_set(
     records: list[PoseCaptureRecord] = []
     for pose in poses:
         pose_dir = out_dir / f"pose_{pose.name}"
+        if settle_s_override is not None:
+            pose = JointPose(
+                name=pose.name,
+                joints=dict(pose.joints),
+                settle_s=float(settle_s_override),
+            )
         rec = _capture_one_pose(
             pose=pose,
             driver=driver,
