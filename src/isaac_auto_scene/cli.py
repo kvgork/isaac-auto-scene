@@ -78,6 +78,34 @@ def _dump_per_pose_debug(
     print(f"[debug] dumped per-pose PLY pairs to {out}/", file=sys.stderr)
 
 
+def _config_dir() -> Path:
+    """User-level persistent config directory for isaac-auto-scene.
+
+    Respects XDG_CONFIG_HOME, falls back to ``~/.config/isaac-auto-scene``.
+    Mirrors where LeRobot keeps its calibration JSONs (under
+    ``~/.cache/huggingface/lerobot``) so hardware-specific files survive
+    a reboot and aren't accidentally checked into the repo.
+    """
+    import os
+
+    base = os.environ.get("XDG_CONFIG_HOME")
+    if base:
+        return Path(base) / "isaac-auto-scene"
+    return Path.home() / ".config" / "isaac-auto-scene"
+
+
+def _default_home_offset_path() -> Path:
+    return _config_dir() / "home_offset.json"
+
+
+def _default_calib_path() -> Path:
+    return _config_dir() / "calib.json"
+
+
+def _default_manual_calibs_dir() -> Path:
+    return _config_dir() / "manual-calibs"
+
+
 def _resolve_fallback(args: argparse.Namespace):
     """Return the fallback registration callable specified by --fallback, or None."""
     name = getattr(args, "fallback", None) or "none"
@@ -927,10 +955,25 @@ def cmd_set_home(args: argparse.Namespace) -> int:
 
 
 def _load_home_offset(path: str | None) -> dict[str, float]:
-    """Load home offset JSON (or return empty dict when None)."""
-    if path is None:
-        return {}
+    """Load home offset JSON.
+
+    When ``path`` is None, auto-discovers from the user config dir
+    (``$XDG_CONFIG_HOME/isaac-auto-scene/home_offset.json`` or
+    ``~/.config/isaac-auto-scene/home_offset.json``).  Returns an empty
+    dict only when no file is supplied and the default isn't present.
+    """
     import json
+
+    if path is None:
+        default_path = _default_home_offset_path()
+        if default_path.exists():
+            path = str(default_path)
+            print(
+                f"[home-offset] auto-loaded {default_path}",
+                file=sys.stderr,
+            )
+        else:
+            return {}
 
     data = json.loads(Path(path).read_text())
     return {k: float(v) for k, v in data.get("home_offset_rad", {}).items()}
@@ -1460,8 +1503,8 @@ def build_parser() -> argparse.ArgumentParser:
     psh.add_argument("--arm-port", default="/dev/ttyACM0")
     psh.add_argument(
         "--out",
-        default="assets/home_offset.json",
-        help="output JSON (default assets/home_offset.json)",
+        default=str(_default_home_offset_path()),
+        help=f"output JSON (default {_default_home_offset_path()})",
     )
     psh.set_defaults(func=cmd_set_home)
 
@@ -1506,11 +1549,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="JSON from `set-home` (subtract its joints from any readback "
         "before passing to URDF FK so LeRobot zero = URDF zero).",
     )
-    pma.add_argument("--out", default="calib.json")
+    pma.add_argument(
+        "--out",
+        default=str(_default_calib_path()),
+        help=f"output calib.json (default {_default_calib_path()})",
+    )
     pma.add_argument(
         "--init-from",
         default=None,
-        help="optional starting calib.json to seed the alignment",
+        help="optional starting calib.json to seed the alignment "
+        f"(default search: {_default_calib_path()} if it exists)",
     )
     pma.add_argument("--target-n-points", type=int, default=8000)
     pma.add_argument(
@@ -1551,8 +1599,9 @@ def build_parser() -> argparse.ArgumentParser:
     pmaa.add_argument("--urdf", required=True)
     pmaa.add_argument(
         "--out-dir",
-        default="/tmp/manual-calibs",
-        help="output dir for per-pose calib_<name>.json files",
+        default=str(_default_manual_calibs_dir()),
+        help=f"output dir for per-pose calib_<name>.json files "
+        f"(default {_default_manual_calibs_dir()})",
     )
     pmaa.add_argument("--home-offset", default=None)
     pmaa.add_argument("--target-n-points", type=int, default=8000)

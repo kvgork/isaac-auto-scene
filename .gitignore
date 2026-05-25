@@ -38,5 +38,7 @@ tests/fixtures/*.ply
 ScreenCamera_*.json
 ScreenCapture_*.png
 
-# Hardware-specific calibration artefacts (regenerate with set-home)
+# Hardware-specific calibration artefacts live in ~/.config/isaac-auto-scene/
+# (set-home, manual-align, manual-align-all default writers).  This entry is
+# kept as a safety net for any legacy file that may still be in assets/.
 assets/home_offset.json
