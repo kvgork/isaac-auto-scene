@@ -52,6 +52,23 @@ class LeRobotSO101Config:
     calibrate: bool = False
     id: str | None = None
     joint_name_map: dict[str, str] | None = None
+    joint_sign_flip: tuple[str, ...] = ()
+    """Per-joint sign flip applied at the LeRobot <-> URDF boundary.
+
+    Some SO-101 servos are wired so that positive servo angle
+    corresponds to URDF-negative motion (and vice versa).  Adding a
+    joint name to this tuple negates BOTH the value sent to the servo
+    on command_joints AND the value returned by read_joints, so the
+    rest of the codebase can treat the joint as if it were
+    URDF-aligned.
+
+    Observed defaults on the test SO-101:
+      shoulder_lift  — flipped (positive servo = lower physically)
+      elbow_flex     — flipped (likely; verify per arm)
+
+    Set via ``LeRobotSO101Config(joint_sign_flip=("shoulder_lift",
+    "elbow_flex"))``.
+    """
 
 
 @dataclass
@@ -109,9 +126,13 @@ class LeRobotSO101Driver:
         if self._robot is None:
             raise RuntimeError("LeRobotSO101Driver: call connect() first")
         action = {}
+        flips = set(self.config.joint_sign_flip)
         for jname, rad in joints.items():
             motor = self._urdf_to_motor(jname)
-            action[f"{motor}.pos"] = math.degrees(float(rad))
+            value = float(rad)
+            if jname in flips or motor in flips:
+                value = -value
+            action[f"{motor}.pos"] = math.degrees(value)
         self._robot.send_action(action)
 
     def read_joints(self) -> dict[str, float]:
@@ -119,13 +140,17 @@ class LeRobotSO101Driver:
         if self._robot is None:
             raise RuntimeError("LeRobotSO101Driver: call connect() first")
         obs = self._robot.get_observation()
+        flips = set(self.config.joint_sign_flip)
         out: dict[str, float] = {}
         for key, value in obs.items():
             if not key.endswith(".pos"):
                 continue  # camera channels and other non-joint observations
             motor = key[: -len(".pos")]
             urdf_joint = self._motor_to_urdf(motor)
-            out[urdf_joint] = math.radians(float(value))
+            rad = math.radians(float(value))
+            if urdf_joint in flips or motor in flips:
+                rad = -rad
+            out[urdf_joint] = rad
         return out
 
     def __enter__(self) -> "LeRobotSO101Driver":

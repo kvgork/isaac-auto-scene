@@ -270,12 +270,7 @@ def cmd_capture_poses(args: argparse.Namespace) -> int:
             LeRobotSO101Driver,
         )
 
-        driver = LeRobotSO101Driver(
-            config=LeRobotSO101Config(
-                port=args.arm_port,
-                calibrate=args.arm_calibrate,
-            )
-        )
+        driver = _build_lerobot_driver(args)
 
     if args.mock_cam:
         source = MockD435Source(seed=args.seed)
@@ -858,9 +853,7 @@ def _live_capture_for_manual_align(args: argparse.Namespace, urdf):
             readback_noise_rad=0.0,
         )
     else:
-        driver = LeRobotSO101Driver(
-            config=LeRobotSO101Config(port=args.arm_port, calibrate=False)
-        )
+        driver = _build_lerobot_driver(args)
 
     if args.mock_cam:
         source = MockD435Source(seed=0)
@@ -982,34 +975,50 @@ def cmd_set_home(args: argparse.Namespace) -> int:
     from isaac_auto_scene.lerobot_arm import LeRobotSO101Config, LeRobotSO101Driver
 
     urdf = load_urdf(args.urdf)
-    driver = LeRobotSO101Driver(
-        config=LeRobotSO101Config(port=args.arm_port, calibrate=False)
-    )
+    driver = _build_lerobot_driver(args)
     print(f"[set-home] reading arm joints from {args.arm_port}...", file=sys.stderr)
     with driver as drv:
         joints = drv.read_joints()
     _print_joint_readback(joints, urdf)
     home_offset = {k: float(v) for k, v in joints.items()}
 
+    # Preserve any existing joint_sign_flip when overwriting the file.
+    existing_flip: list[str] = []
     out_path = Path(args.out)
+    if out_path.exists():
+        try:
+            existing = json.loads(out_path.read_text())
+            existing_flip = list(existing.get("joint_sign_flip", []))
+        except (OSError, ValueError):
+            pass
+    if args.sign_flip:
+        sign_flip = list(args.sign_flip.split(","))
+    else:
+        sign_flip = existing_flip
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(
         json.dumps(
             {
                 "home_offset_rad": home_offset,
+                "joint_sign_flip": sign_flip,
                 "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "port": args.arm_port,
                 "note": (
-                    "Subtract these values from any subsequent LeRobot "
-                    "readback before passing joints to URDF FK. The arm "
-                    "was physically in the URDF home pose when this file "
-                    "was written."
+                    "Subtract home_offset_rad from any subsequent LeRobot "
+                    "readback before passing joints to URDF FK.  Joints in "
+                    "joint_sign_flip have their servo direction inverted "
+                    "by the LeRobotSO101Driver so URDF coords match "
+                    "physical motion."
                 ),
             },
             indent=2,
         )
     )
-    print(f"[set-home] wrote home offset -> {out_path}")
+    print(
+        f"[set-home] wrote home offset -> {out_path}  "
+        f"(sign_flip={sign_flip or '[]'})"
+    )
     return 0
 
 
@@ -1041,6 +1050,41 @@ def _load_home_offset(
 
     data = json.loads(Path(path).read_text())
     return {k: float(v) for k, v in data.get("home_offset_rad", {}).items()}
+
+
+def _load_joint_sign_flip(path: str | None = None) -> tuple[str, ...]:
+    """Load the ``joint_sign_flip`` tuple from home_offset.json.
+
+    Servos on this SO-101 are wired so positive servo angle corresponds
+    to URDF-negative motion on shoulder_lift + elbow_flex.  The flip
+    list is part of the per-arm calibration (alongside home_offset_rad)
+    so it persists across reboots without per-command CLI flags.
+    """
+    import json
+
+    target = Path(path) if path else _default_home_offset_path()
+    if not target.exists():
+        return ()
+    try:
+        data = json.loads(target.read_text())
+    except (OSError, ValueError):
+        return ()
+    flip = data.get("joint_sign_flip", [])
+    return tuple(str(j) for j in flip)
+
+
+def _build_lerobot_driver(args):
+    """Construct a ``LeRobotSO101Driver`` with the persisted per-arm config."""
+    from isaac_auto_scene.lerobot_arm import LeRobotSO101Config, LeRobotSO101Driver
+
+    flips = _load_joint_sign_flip(getattr(args, "home_offset", None))
+    return LeRobotSO101Driver(
+        config=LeRobotSO101Config(
+            port=getattr(args, "arm_port", "/dev/ttyACM0"),
+            calibrate=getattr(args, "arm_calibrate", False),
+            joint_sign_flip=flips,
+        )
+    )
 
 
 def _apply_home_offset(
@@ -1581,6 +1625,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--out",
         default=str(_default_home_offset_path()),
         help=f"output JSON (default {_default_home_offset_path()})",
+    )
+    psh.add_argument(
+        "--sign-flip",
+        default=None,
+        help="Comma-separated list of joints whose servo direction is "
+        "inverted relative to the URDF (e.g. 'shoulder_lift,elbow_flex'). "
+        "Persisted into the home_offset JSON so all subsequent live "
+        "commands negate sign automatically.  Pass empty string to clear.",
     )
     psh.set_defaults(func=cmd_set_home)
 
