@@ -553,7 +553,49 @@ def cmd_render(args: argparse.Namespace) -> int:  # pragma: no cover - external 
         print(f"ERROR: render produced empty output {args.out}", file=sys.stderr)
         return 1
     print(f"render ok -> {args.out}")
+
+    if getattr(args, "show", True):
+        _open_image_viewer(args.out)
     return 0
+
+
+def _open_image_viewer(path: str) -> None:
+    """Open the rendered PNG in the user's default image viewer (non-blocking).
+
+    Tries `xdg-open` first (Linux desktop default), then `feh`, `eog`,
+    `xdg-open` again as a last resort.  Silently skips when no viewer is
+    available — the file is still on disk regardless.
+    """
+    import shutil
+    import subprocess
+
+    candidates = ["xdg-open", "feh", "eog", "gio"]
+    for tool in candidates:
+        if shutil.which(tool) is None:
+            continue
+        try:
+            if tool == "gio":
+                subprocess.Popen(
+                    ["gio", "open", path],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            else:
+                subprocess.Popen(
+                    [tool, path],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            print(f"[render] opened {path} with {tool}", file=sys.stderr)
+            return
+        except (FileNotFoundError, OSError) as exc:  # pragma: no cover - env-dep
+            print(f"[render] {tool} failed: {exc}", file=sys.stderr)
+            continue
+    print(
+        f"[render] no image viewer found ({', '.join(candidates)}); "
+        f"open {path} manually.",
+        file=sys.stderr,
+    )
 
 
 def cmd_smoke(args: argparse.Namespace) -> int:
@@ -1171,6 +1213,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=60,
         help="extra sim steps after warm-up so the ROS2 publisher can push "
         "frames out (default 60 = ~1 s @ 60 Hz)",
+    )
+    pr.add_argument(
+        "--show",
+        dest="show",
+        action="store_true",
+        default=True,
+        help="open the rendered PNG in the default image viewer (default).",
+    )
+    pr.add_argument(
+        "--no-show",
+        dest="show",
+        action="store_false",
+        help="skip opening the image viewer.",
     )
     pr.set_defaults(func=cmd_render)
 
