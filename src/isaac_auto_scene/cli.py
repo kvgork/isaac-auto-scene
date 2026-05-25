@@ -1035,6 +1035,119 @@ def cmd_manual_align(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_manual_align_all(args: argparse.Namespace) -> int:
+    """Loop over every ok pose in a capture set, open the manual aligner
+    for each one, save a per-pose calib_<name>.json, then print a
+    summary table.  Useful for comparing single-pose fits and picking
+    the best one (or feeding the best as --init-from to a bundle run).
+    """
+    from isaac_auto_scene.capture_multi import load_manifest, load_pose_capture
+    from isaac_auto_scene.manual_align import run_manual_align
+    from isaac_auto_scene.register import RegistrationResult
+    from isaac_auto_scene.segment import segment_table_arm
+
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    urdf = load_urdf(args.urdf)
+    manifest = load_manifest(Path(args.captures))
+    ok_poses = [r for r in manifest.poses if r.status == "ok"]
+    home_offset = _load_home_offset(getattr(args, "home_offset", None))
+
+    print(
+        f"[manual-align-all] {len(ok_poses)} pose(s) to align. "
+        f"Output dir: {out_dir}",
+        flush=True,
+    )
+
+    summary: list[dict] = []
+    for idx, rec in enumerate(ok_poses, start=1):
+        print(
+            f"\n[manual-align-all] [{idx}/{len(ok_poses)}] pose {rec.name!r}",
+            flush=True,
+        )
+        cap = load_pose_capture(Path(args.captures), rec)
+        joints_urdf = _apply_home_offset(dict(rec.readback_joints), home_offset)
+        cad = assemble_pcd(urdf, joints_urdf, target_n_points=args.target_n_points)
+        seg = segment_table_arm(
+            cap.pcd,
+            workspace_z_max_m=args.workspace_z_max,
+            workspace_z_min_m=args.workspace_z_min,
+            expected_up=_parse_expected_up(args.expected_up),
+            up_tolerance_deg=args.up_tol_deg,
+            arm_merge_radius_m=args.arm_merge_radius,
+            outlier_nb_neighbors=args.outlier_neighbors,
+            outlier_std_ratio=args.outlier_std,
+        )
+        T_final = run_manual_align(
+            cad.points,
+            seg.arm_cloud,
+            T_init=np.eye(4),
+            window_title=f"manual-align: {rec.name} ({idx}/{len(ok_poses)})",
+            step_m=args.step,
+            rot_step_deg=args.rot_step,
+            icp_threshold_m=args.icp_threshold,
+        )
+        if T_final is None:
+            print(
+                f"[manual-align-all] pose {rec.name!r} cancelled (window closed)",
+                flush=True,
+            )
+            summary.append({"name": rec.name, "calib": None, "fitness": None, "rmse_mm": None})
+            continue
+
+        # Re-run a final ICP and capture its fitness/rmse for the summary.
+        from isaac_auto_scene.bundle_register import register_bundle
+
+        bundle = register_bundle(
+            [np.asarray(cad.points, dtype=np.float64)],
+            [seg.arm_cloud],
+            T_init=T_final,
+            inlier_distance_m=0.02,
+            max_nfev=50,
+        )
+        synth_reg = RegistrationResult(
+            T=bundle.T, fitness=bundle.per_pose_fitness[0],
+            inlier_rmse_m=bundle.per_pose_rmse_m[0],
+            used_fallback=True, n_restarts=0,
+        )
+        calib_path = out_dir / f"calib_{rec.name}.json"
+        calib = build_calibration(cap, cad, synth_reg, T_cam_table=seg.T_world_table)
+        save_calibration(calib, calib_path)
+        print(
+            f"[manual-align-all] pose {rec.name!r}: fitness="
+            f"{bundle.per_pose_fitness[0]:.3f} rmse="
+            f"{bundle.per_pose_rmse_m[0]*1000:.2f}mm -> {calib_path}",
+            flush=True,
+        )
+        summary.append(
+            {
+                "name": rec.name,
+                "calib": str(calib_path),
+                "fitness": float(bundle.per_pose_fitness[0]),
+                "rmse_mm": float(bundle.per_pose_rmse_m[0] * 1000),
+            }
+        )
+
+    print("\n================ MANUAL-ALIGN-ALL SUMMARY ================")
+    print(f"{'pose':<20s} {'fitness':>8s} {'rmse_mm':>10s} {'calib':<s}")
+    print(f"{'-'*20} {'-'*8} {'-'*10} {'-'*40}")
+    saved = [s for s in summary if s["calib"] is not None]
+    if saved:
+        best = max(saved, key=lambda s: s["fitness"])
+    else:
+        best = None
+    for s in summary:
+        marker = " *" if best is not None and s is best else "  "
+        f = f"{s['fitness']:.3f}" if s["fitness"] is not None else "-"
+        r = f"{s['rmse_mm']:.2f}" if s["rmse_mm"] is not None else "-"
+        c = s["calib"] or "(cancelled)"
+        print(f"{marker}{s['name']:<18s} {f:>8s} {r:>10s} {c}")
+    print("=" * 60)
+    if best:
+        print(f"[manual-align-all] best: {best['name']} -> {best['calib']}")
+    return 0 if saved else 2
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
     """Forward-projection residual report from calib.json + scene.usd."""
     calib = load_calibration(args.calib)
@@ -1405,6 +1518,32 @@ def build_parser() -> argparse.ArgumentParser:
     pma.add_argument("--outlier-neighbors", type=int, default=0)
     pma.add_argument("--outlier-std", type=float, default=2.0)
     pma.set_defaults(func=cmd_manual_align)
+
+    pmaa = sub.add_parser(
+        "manual-align-all",
+        help="open the manual aligner for every ok pose in a capture set "
+        "and write per-pose calib JSONs + a summary table",
+    )
+    pmaa.add_argument("--captures", required=True)
+    pmaa.add_argument("--urdf", required=True)
+    pmaa.add_argument(
+        "--out-dir",
+        default="/tmp/manual-calibs",
+        help="output dir for per-pose calib_<name>.json files",
+    )
+    pmaa.add_argument("--home-offset", default=None)
+    pmaa.add_argument("--target-n-points", type=int, default=8000)
+    pmaa.add_argument("--step", type=float, default=0.01)
+    pmaa.add_argument("--rot-step", type=float, default=5.0)
+    pmaa.add_argument("--icp-threshold", type=float, default=0.02)
+    pmaa.add_argument("--workspace-z-max", type=float, default=None)
+    pmaa.add_argument("--workspace-z-min", type=float, default=None)
+    pmaa.add_argument("--expected-up", default=None)
+    pmaa.add_argument("--up-tol-deg", type=float, default=30.0)
+    pmaa.add_argument("--arm-merge-radius", type=float, default=0.0)
+    pmaa.add_argument("--outlier-neighbors", type=int, default=0)
+    pmaa.add_argument("--outlier-std", type=float, default=2.0)
+    pmaa.set_defaults(func=cmd_manual_align_all)
 
     pv = sub.add_parser("validate", help="forward-projection residual report")
     pv.add_argument("--calib", required=True)
