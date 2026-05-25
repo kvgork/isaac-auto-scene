@@ -37,3 +37,6 @@ tests/fixtures/*.ply
 # Open3D Visualizer screen captures (created on Ctrl+S / Ctrl+P in the viewer)
 ScreenCamera_*.json
 ScreenCapture_*.png
+
+# Hardware-specific calibration artefacts (regenerate with set-home)
+assets/home_offset.json
