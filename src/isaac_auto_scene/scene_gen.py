@@ -45,6 +45,11 @@ class SceneSpec:
         Isaac PinholeCameraCfg kwargs derived from RealSense intrinsics.
     enable_ros2:
         Whether the ROS2 camera publisher OmniGraph should be attached.
+    so101_usd_path:
+        Optional path to the SO-101 USD asset.  When provided,
+        :func:`build_isaac_scene` spawns an ArticulationCfg at
+        ``/World/SO101``.  When ``None`` only the Xform stub appears in the
+        USD stub output and ``build_isaac_scene`` skips articulation spawn.
     """
 
     camera_position_m: tuple[float, float, float]
@@ -54,6 +59,45 @@ class SceneSpec:
     table_size_m: tuple[float, float, float] = (0.6, 0.4, 0.02)
     pinhole_cfg: dict[str, float | int] = field(default_factory=dict)
     enable_ros2: bool = False
+    so101_usd_path: str | None = None
+
+
+SO101_JOINT_NAMES: tuple[str, ...] = (
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll",
+    "gripper",
+)
+"""Canonical SO-101 joint order matching ``so101_new_calib.urdf``.
+
+Borrowed from the sibling ``lerobot-isaac-training`` package
+(see ``lerobot_isaac_env/so101_articulation.py``) — the legacy
+CAD-style names ``(Rotation, Pitch, Elbow, Wrist_Pitch, Wrist_Roll, Jaw)``
+are NOT compatible with the current canonical URDF/USD pair.
+"""
+
+
+def resolve_default_so101_usd() -> str | None:
+    """Return the default SO-101 USD path from the sibling lerobot env, if present.
+
+    The USD is not vendored in this repository to keep the package light;
+    we borrow the asset converted by ``lerobot-isaac-training``.  Returns
+    ``None`` when the asset is missing — callers must then pass an explicit
+    path via ``SceneSpec.so101_usd_path``.
+    """
+    candidate = (
+        Path.home()
+        / "workspaces"
+        / "lerobot-isaac-training"
+        / "src"
+        / "lerobot-isaac-env"
+        / "assets"
+        / "usd"
+        / "so101.usd"
+    )
+    return str(candidate) if candidate.exists() else None
 
 
 def build_scene_spec(
@@ -204,9 +248,11 @@ def build_isaac_scene(spec: SceneSpec) -> dict[str, Any]:  # pragma: no cover - 
       - ``/World/DomeLight`` — DomeLightCfg at default intensity
       - ``/World/D435`` — Camera at ``spec.camera_position_m`` /
         ``spec.camera_quat_xyzw`` with ``spec.pinhole_cfg`` intrinsics
+      - ``/World/SO101`` — ArticulationCfg when ``spec.so101_usd_path`` is
+        provided (or :func:`resolve_default_so101_usd` succeeds).  Omitted
+        otherwise so headless smoke tests can still run without the USD.
 
-    Returns a dict ``{"camera": Camera}`` so the caller can ``camera.update()``
-    after each ``sim.step()``.
+    Returns a dict ``{"camera": Camera, "arm": Articulation | None}``.
     """
     import isaaclab.sim as sim_utils
     from isaaclab.sensors.camera import Camera, CameraCfg
@@ -231,7 +277,52 @@ def build_isaac_scene(spec: SceneSpec) -> dict[str, Any]:  # pragma: no cover - 
         ),
     )
     camera = Camera(cfg=camera_cfg)
-    return {"camera": camera}
+
+    arm = _build_so101_articulation(spec, sim_utils)
+    return {"camera": camera, "arm": arm}
+
+
+def _build_so101_articulation(spec: SceneSpec, sim_utils: Any) -> Any:  # pragma: no cover
+    """Spawn the SO-101 ArticulationCfg at ``/World/SO101`` when USD is available.
+
+    Returns the Articulation instance, or None when no USD is provided AND
+    no default USD can be resolved.  The arm's root pose comes from
+    ``spec.arm_position_m`` / ``spec.arm_quat_xyzw`` (in world frame).
+    """
+    usd_path = spec.so101_usd_path or resolve_default_so101_usd()
+    if usd_path is None:
+        return None
+
+    from isaaclab.actuators import ImplicitActuatorCfg
+    from isaaclab.assets import Articulation, ArticulationCfg
+
+    cfg = ArticulationCfg(
+        prim_path="/World/SO101",
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=usd_path,
+            activate_contact_sensors=False,
+        ),
+        init_state=ArticulationCfg.InitialStateCfg(
+            pos=spec.arm_position_m,
+            rot=_quat_xyzw_to_wxyz(spec.arm_quat_xyzw),
+            joint_pos={name: 0.0 for name in SO101_JOINT_NAMES},
+            joint_vel={name: 0.0 for name in SO101_JOINT_NAMES},
+        ),
+        actuators={
+            "so101_arm": ImplicitActuatorCfg(
+                joint_names_expr=[".*"],
+                stiffness=80.0,
+                damping=4.0,
+            ),
+        },
+    )
+    return Articulation(cfg=cfg)
+
+
+def _quat_xyzw_to_wxyz(q: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+    """Isaac Lab ``init_state.rot`` uses (w, x, y, z) order."""
+    x, y, z, w = q
+    return (w, x, y, z)
 
 
 def warm_up_render(render_step: Callable[[], None], n_frames: int = WARM_UP_FRAMES) -> None:

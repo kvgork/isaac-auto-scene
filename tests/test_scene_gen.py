@@ -16,8 +16,10 @@ from isaac_auto_scene.cad import CADResult
 from isaac_auto_scene.capture import CaptureResult
 from isaac_auto_scene.register import RegistrationResult
 from isaac_auto_scene.scene_gen import (
+    SO101_JOINT_NAMES,
     WARM_UP_FRAMES,
     build_scene_spec,
+    resolve_default_so101_usd,
     warm_up_render,
     write_usd_stub,
 )
@@ -91,3 +93,28 @@ def test_warm_up_render_count() -> None:
 
 def test_warm_up_default_is_30() -> None:
     assert WARM_UP_FRAMES == 30
+
+
+def test_so101_joint_names_match_urdf() -> None:
+    assert SO101_JOINT_NAMES == (
+        "shoulder_pan",
+        "shoulder_lift",
+        "elbow_flex",
+        "wrist_flex",
+        "wrist_roll",
+        "gripper",
+    )
+
+
+def test_so101_usd_path_default_none(tmp_path: Path) -> None:
+    """SceneSpec.so101_usd_path defaults to None so calibration-only flows skip articulation."""
+    calib = _stub_calib(tmp_path)
+    spec = build_scene_spec(calib)
+    assert spec.so101_usd_path is None
+
+
+def test_resolve_default_so101_usd_or_none() -> None:
+    """resolve_default_so101_usd returns either a valid path or None — never raises."""
+    result = resolve_default_so101_usd()
+    if result is not None:
+        assert Path(result).exists()
