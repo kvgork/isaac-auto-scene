@@ -71,16 +71,25 @@ class LeRobotSO101Driver:
 
     def connect(self) -> None:
         try:
-            from lerobot.robots.so_follower import (  # type: ignore[import]
-                SO101Follower,
-                SO101FollowerConfig,
-            )
+            # lerobot 0.3.x uses lerobot.robots.so101_follower; 0.4+ moved to
+            # lerobot.robots.so_follower. Try the newer path first.
+            try:
+                from lerobot.robots.so_follower import (  # type: ignore[import]
+                    SO101Follower,
+                    SO101FollowerConfig,
+                )
+            except ImportError:
+                from lerobot.robots.so101_follower import (  # type: ignore[import]
+                    SO101Follower,
+                    SO101FollowerConfig,
+                )
         except ImportError as exc:
             raise RuntimeError(
                 "lerobot is not installed in this pixi env. "
-                "Install via `pip install lerobot[feetech]` into the hardware "
-                "env, or invoke isaac-auto-scene from the sibling "
-                "lerobot-isaac-training env which already has it."
+                "Install via `.pixi/envs/hardware/bin/pip install "
+                "'lerobot[feetech]>=0.3.2,<0.4'` (see pixi.toml for resolver "
+                "caveat), or invoke from the sibling lerobot-isaac-training "
+                "env which already has it."
             ) from exc
 
         cfg_kwargs: dict[str, Any] = {"port": self.config.port}
