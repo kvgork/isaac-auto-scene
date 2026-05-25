@@ -92,6 +92,35 @@ def _icp_tensor(
     )
 
 
+def _random_so3(rng: np.random.Generator) -> np.ndarray:
+    """Uniform random rotation matrix via Shoemake's quaternion method.
+
+    Returns a 3x3 rotation matrix drawn uniformly from SO(3) — every
+    orientation is equally likely, unlike axis-angle with bounded angle
+    which biases toward identity.
+    """
+    u1, u2, u3 = rng.uniform(size=3)
+    sqrt1mu1 = np.sqrt(1.0 - u1)
+    sqrtu1 = np.sqrt(u1)
+    q = np.array(
+        [
+            sqrt1mu1 * np.sin(2.0 * np.pi * u2),
+            sqrt1mu1 * np.cos(2.0 * np.pi * u2),
+            sqrtu1 * np.sin(2.0 * np.pi * u3),
+            sqrtu1 * np.cos(2.0 * np.pi * u3),
+        ]
+    )
+    x, y, z, w = q
+    R = np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ]
+    )
+    return R
+
+
 def _rodrigues(axis: np.ndarray, angle: float) -> np.ndarray:
     a = axis / np.linalg.norm(axis)
     K = np.array(
@@ -117,8 +146,31 @@ def register_global_local(
         RegistrationResult,
     ] | None = None,
     fallback_fitness: float = 0.40,
+    coarse_max_iter: int = 50,
+    fine_max_iter: int = 150,
+    full_so3_init: bool = True,
 ) -> RegistrationResult:
-    """Random-restart tensor-API ICP global init + point-to-plane refine."""
+    """Random-restart tensor-API ICP global init + point-to-plane refine.
+
+    Parameters
+    ----------
+    n_restarts:
+        Number of random initial rotations attempted.  Higher = more
+        chance of escaping local minima on a partial-view target.
+    coarse_max_iter / fine_max_iter:
+        Per-restart ICP iteration budgets.  Doubled vs the pre-Phase-7
+        defaults (30 / 80) — the prior values truncated convergence on
+        real D435 captures with cluttered targets.
+    full_so3_init:
+        When True (default), random restarts sample full SO(3) via
+        unit quaternions (any orientation in 3D).  When False, fall
+        back to the legacy ±0.6 rad wedge — only useful when the
+        caller has already pre-aligned the source and just wants a
+        small wiggle search.  Partial views with no prior knowledge
+        of arm orientation need True; the legacy ±34° wedge silently
+        traps ICP in different per-pose basins (observed: 72° transform
+        dispersion across 5 real captures).
+    """
     radius_normal = voxel_size * 2.0
     src_down_t = _voxel_down_with_normals(source, voxel_size, radius_normal)
     tgt_down_t = _voxel_down_with_normals(target, voxel_size, radius_normal)
@@ -138,15 +190,17 @@ def register_global_local(
         T_try = np.eye(4)
         T_try[:3, 3] = t_init
         if i > 0:
-            axis = rng.normal(size=3)
-            axis /= np.linalg.norm(axis)
-            angle = float(rng.uniform(-0.6, 0.6))
-            T_try[:3, :3] = _rodrigues(axis, angle)
+            if full_so3_init:
+                T_try[:3, :3] = _random_so3(rng)
+            else:
+                axis = rng.normal(size=3)
+                axis /= np.linalg.norm(axis)
+                angle = float(rng.uniform(-0.6, 0.6))
+                T_try[:3, :3] = _rodrigues(axis, angle)
 
-        # Point-to-point first (more robust to bad normals)
         coarse = _icp_tensor(
             src_down_t, tgt_down_t, T_try, coarse_distance,
-            use_point_to_plane=False, max_iter=30,
+            use_point_to_plane=False, max_iter=coarse_max_iter,
         )
         fit = float(coarse.fitness)
         if fit > best_fitness:
@@ -156,10 +210,9 @@ def register_global_local(
     if best_fitness < fallback_fitness and fallback is not None:
         return fallback(source, target)
 
-    # Fine refinement with point-to-plane on the downsampled cloud
     fine = _icp_tensor(
         src_down_t, tgt_down_t, best_T, fine_distance,
-        use_point_to_plane=True, max_iter=80,
+        use_point_to_plane=True, max_iter=fine_max_iter,
     )
 
     return RegistrationResult(
@@ -171,8 +224,24 @@ def register_global_local(
     )
 
 
-def passes_quality_gate(result: RegistrationResult) -> bool:
-    f_min, rmse_max = QUALITY_GATE
+def passes_quality_gate(
+    result: RegistrationResult,
+    gate: tuple[float, float] | None = None,
+) -> bool:
+    """Check a result against the quality gate.
+
+    Parameters
+    ----------
+    result:
+        RegistrationResult to evaluate.
+    gate:
+        Optional override of ``(fitness_min, rmse_max_m)``.  Falls back to
+        :data:`QUALITY_GATE` (0.65 / 5 mm) when None.  Hardware bring-up
+        with cluttered captures often needs a looser gate (e.g.
+        ``(0.30, 0.012)``) until the CAD model is refined or the
+        registration backend is upgraded.
+    """
+    f_min, rmse_max = gate if gate is not None else QUALITY_GATE
     return result.fitness >= f_min and result.inlier_rmse_m <= rmse_max
 
 
@@ -251,6 +320,12 @@ def register_multi_pose(
     coarse_distance: float = 0.05,
     fine_distance: float = 0.01,
     min_accepted: int = 2,
+    quality_gate: tuple[float, float] | None = None,
+    fallback: Callable[
+        [o3d.geometry.PointCloud, o3d.geometry.PointCloud],
+        RegistrationResult,
+    ]
+    | None = None,
 ) -> MultiPoseResult:
     """Run per-pose ICP, reject outliers, aggregate into one transform.
 
@@ -281,6 +356,8 @@ def register_multi_pose(
     accepted_Ts: list[np.ndarray] = []
     accepted_weights: list[float] = []
 
+    effective_gate = quality_gate if quality_gate is not None else QUALITY_GATE
+
     for pose_name, src, tgt in pairs:
         try:
             reg = register_global_local(
@@ -290,6 +367,7 @@ def register_multi_pose(
                 n_restarts=n_restarts,
                 coarse_distance=coarse_distance,
                 fine_distance=fine_distance,
+                fallback=fallback,
             )
         except Exception as exc:
             per_pose.append(
@@ -304,7 +382,7 @@ def register_multi_pose(
             )
             continue
 
-        if passes_quality_gate(reg):
+        if passes_quality_gate(reg, gate=effective_gate):
             per_pose.append(
                 PerPoseRegistration(
                     pose_name=pose_name,
@@ -325,8 +403,10 @@ def register_multi_pose(
                     inlier_rmse_m=reg.inlier_rmse_m,
                     T=np.asarray(reg.T, dtype=np.float64),
                     reason=(
-                        f"quality_gate(fitness>={QUALITY_GATE[0]:.2f},"
-                        f"rmse<={QUALITY_GATE[1]*1000:.0f}mm)"
+                        f"quality_gate(fitness>={effective_gate[0]:.2f},"
+                        f"rmse<={effective_gate[1]*1000:.0f}mm)  "
+                        f"actual fitness={reg.fitness:.3f} "
+                        f"rmse={reg.inlier_rmse_m*1000:.2f}mm"
                     ),
                 )
             )

@@ -93,6 +93,9 @@ def test_smoke_mock_capture_and_register(tmp_path: Path) -> None:
         arm_merge_radius=0.0,
         outlier_neighbors=0,
         outlier_std=2.0,
+        gate_fitness=None,
+        gate_rmse=None,
+        fallback="none",
     )
     try:
         rc = cmd_register_multi(reg_args)

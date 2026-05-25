@@ -44,6 +44,26 @@ def _pcd_from_np(pts):
     return p
 
 
+def _resolve_fallback(args: argparse.Namespace):
+    """Return the fallback registration callable specified by --fallback, or None."""
+    name = getattr(args, "fallback", None) or "none"
+    name = str(name).lower()
+    if name in ("none", ""):
+        return None
+    if name in ("fpfh_ransac", "fpfh-ransac"):
+        from isaac_auto_scene.learned_register import register_with_fpfh_ransac
+
+        voxel = float(getattr(args, "voxel", 0.005))
+
+        def _wrapped(source, target):
+            return register_with_fpfh_ransac(source, target, voxel_size=voxel)
+
+        return _wrapped
+    raise ValueError(
+        f"unknown --fallback backend: {name!r} (supported: none, fpfh_ransac)"
+    )
+
+
 def _parse_expected_up(value: str | None) -> tuple[float, float, float] | None:
     """Parse '--expected-up x,y,z' (or None) into a 3-tuple."""
     if value is None or value == "":
@@ -188,11 +208,30 @@ def cmd_register_multi(args: argparse.Namespace) -> int:
         print("ERROR: no usable poses in manifest", file=sys.stderr)
         return 1
 
+    gate_override: tuple[float, float] | None = None
+    if args.gate_fitness is not None or args.gate_rmse is not None:
+        f_min, rmse_max = QUALITY_GATE
+        if args.gate_fitness is not None:
+            f_min = float(args.gate_fitness)
+        if args.gate_rmse is not None:
+            rmse_max = float(args.gate_rmse)
+        gate_override = (f_min, rmse_max)
+        print(
+            f"[register-multi] quality gate override: fitness>={f_min:.2f} "
+            f"rmse<={rmse_max*1000:.1f}mm (default {QUALITY_GATE[0]:.2f}/"
+            f"{QUALITY_GATE[1]*1000:.0f}mm)",
+            file=sys.stderr,
+        )
+
+    fallback_fn = _resolve_fallback(args)
+
     multi = register_multi_pose(
         pairs,
         voxel_size=args.voxel,
         n_restarts=args.restarts,
         min_accepted=args.min_accepted,
+        quality_gate=gate_override,
+        fallback=fallback_fn,
     )
 
     # Reuse build_calibration's quat conversion / intrinsics packaging via
@@ -400,6 +439,9 @@ def cmd_smoke(args: argparse.Namespace) -> int:
         arm_merge_radius=args.arm_merge_radius,
         outlier_neighbors=args.outlier_neighbors,
         outlier_std=args.outlier_std,
+        gate_fitness=args.gate_fitness,
+        gate_rmse=args.gate_rmse,
+        fallback=args.fallback,
     )
     try:
         rc = cmd_register_multi(reg_args)
@@ -571,6 +613,29 @@ def build_parser() -> argparse.ArgumentParser:
         default=2.0,
         help="Std-dev multiplier for outlier filter (lower = more aggressive).",
     )
+    prm.add_argument(
+        "--gate-fitness",
+        type=float,
+        default=None,
+        help="Override the quality-gate minimum fitness (default 0.65). "
+        "Hardware bring-up with cluttered captures often needs ~0.30.",
+    )
+    prm.add_argument(
+        "--gate-rmse",
+        type=float,
+        default=None,
+        help="Override the quality-gate maximum RMSE in metres (default "
+        "0.005). Try ~0.012 for noisy real captures.",
+    )
+    prm.add_argument(
+        "--fallback",
+        default="none",
+        choices=["none", "fpfh_ransac"],
+        help="Robust registration backend invoked when classic ICP scores "
+        "below the per-restart fallback threshold. 'fpfh_ransac' uses "
+        "Open3D FPFH features + custom RANSAC Procrustes (Kabsch SVD) — "
+        "no extra deps, robust to partial overlap + clutter.",
+    )
     prm.set_defaults(func=cmd_register_multi)
 
     pg = sub.add_parser("generate", help="calib.json -> scene.usd")
@@ -667,6 +732,24 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=2.0,
         help="Std-dev multiplier for outlier filter.",
+    )
+    ps.add_argument(
+        "--gate-fitness",
+        type=float,
+        default=None,
+        help="Override quality-gate minimum fitness.",
+    )
+    ps.add_argument(
+        "--gate-rmse",
+        type=float,
+        default=None,
+        help="Override quality-gate maximum RMSE (m).",
+    )
+    ps.add_argument(
+        "--fallback",
+        default="none",
+        choices=["none", "fpfh_ransac"],
+        help="Robust registration backend (default none).",
     )
     ps.set_defaults(func=cmd_smoke)
 
