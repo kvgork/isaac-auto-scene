@@ -9,6 +9,15 @@ into the rendered USD.
 End-to-end workflow tested on real D435 + SO-101 follower; reaches mean
 fitness 0.82 / RMSE 10 mm across a 5-pose multi-pose bundle on the test rig.
 
+## Pipeline at a glance
+
+Real RealSense D435 frame → manual CAD-over-cloud alignment → calibrated
+Isaac Sim render of the mirrored scene:
+
+| 1. Real camera (D435) | 2. Manual CAD alignment | 3. Isaac Sim render |
+| :---: | :---: | :---: |
+| ![Real D435 frame](docs/img/cam_view.png) | ![Manual CAD-over-cloud alignment](docs/img/manual_align.png) | ![Calibrated Isaac Sim render](docs/img/render.png) |
+
 ## Install
 
 ```bash
@@ -102,13 +111,32 @@ pixi run fmt           # ruff format
 pixi run typecheck     # mypy
 ```
 
+## Isaac Sim requirement
+
+The `sim` feature and the `render` command need an **Isaac Sim 6.0 + Isaac Lab**
+Python environment. This package does not install Isaac Sim itself — on the
+development rig it borrows the interpreter from a sibling `lerobot-isaac-training`
+pixi env (see [CLAUDE.md](CLAUDE.md) for the rationale).
+
+To use your own Isaac Sim install, point the renderer at its interpreter:
+
+```bash
+export ISAAC_PYTHON=/path/to/your/isaac-sim/python
+# or per-invocation:
+isaac-auto-scene render --calib calib.json --out frame.png \
+  --isaac-python /path/to/your/isaac-sim/python
+```
+
+The geometry/registration pipeline (capture, segment, register) runs in the
+default env and needs no Isaac Sim.
+
 ## Reference
 
-- Plan: `01-Projects/isaac-auto-scene-package-plan.md` (vault)
-- Research: `05-Wiki/research/2026-05-18-isaac-auto-scene-from-d435.md` (vault)
-- Isaac Sim 6.0 + Isaac Lab 0.54.3 (borrowed from `lerobot-isaac-training`)
+- Isaac Sim 6.0 + Isaac Lab 0.54.3 — see [Isaac Sim requirement](#isaac-sim-requirement)
 - Python 3.11 + Open3D 0.18 (tensor-API ICP only — legacy pipeline segfaults
-  on this build, see CLAUDE.md)
+  on this build, see [CLAUDE.md](CLAUDE.md))
+- Design notes & known pitfalls: [docs/usage.md](docs/usage.md),
+  [docs/troubleshooting.md](docs/troubleshooting.md)
 
 ## License
 

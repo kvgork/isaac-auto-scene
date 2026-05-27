@@ -22,7 +22,7 @@ from typing import Any, Callable
 
 import numpy as np
 
-from isaac_auto_scene.calibrate import CalibrationOutput, load_calibration
+from isaac_auto_scene.calibrate import CalibrationOutput
 from isaac_auto_scene.utils.intrinsics import realsense_to_isaac
 
 
@@ -121,10 +121,19 @@ def build_scene_spec(
 ) -> SceneSpec:
     """Convert a CalibrationOutput into a SceneSpec.
 
-    World convention: the table is at the origin, +Z up.  The camera and
-    arm poses come directly from calib (already in world == table frame
-    by upstream convention).
+    World convention: SO-101 arm base at the origin; camera and table poses
+    derived from the calibration by inverting T_cam_arm.
+
+    ``calib.quat_xyzw`` / ``calib.translation_m`` describe T_cam_arm — they
+    map a point in the arm base frame to the camera (optical) frame:
+    ``p_cam = R @ p_arm + t``.  Inverting gives T_arm_cam, i.e. the camera
+    pose expressed in the arm-base world frame.
     """
+    from isaac_auto_scene.utils.transforms import (
+        quat_xyzw_to_rotation_matrix,
+        rotation_matrix_to_quat_xyzw,
+    )
+
     K = np.array(
         [
             [calib.intrinsics["fx"], 0.0, calib.intrinsics["cx"]],
@@ -137,34 +146,56 @@ def build_scene_spec(
         K, int(calib.intrinsics["width"]), int(calib.intrinsics["height"])
     )
 
-    # The calibration provides arm-in-camera transform; world == camera
-    # frame (camera at origin, identity rotation).  For richer scenes the
-    # orchestrator would supply T_world_camera explicitly.
-    arm_t = tuple(calib.translation_m)
-    arm_q = tuple(calib.quat_xyzw)
-    cam_t = (0.0, 0.0, 0.0)
-    cam_q = (0.0, 0.0, 0.0, 1.0)
+    # T_cam_arm: R maps arm-frame -> camera-frame, t is arm origin in camera frame.
+    R = quat_xyzw_to_rotation_matrix(np.asarray(calib.quat_xyzw, dtype=np.float64))
+    t = np.asarray(calib.translation_m, dtype=np.float64)
+
+    # Invert: T_world_cam = inv(T_cam_arm)
+    # R_wc = R^T,  t_wc = -R^T @ t
+    R_wc = R.T
+    t_wc = -R_wc @ t
+    q_wc = rotation_matrix_to_quat_xyzw(R_wc)
+
+    cam_t = (float(t_wc[0]), float(t_wc[1]), float(t_wc[2]))
+    cam_q = (float(q_wc[0]), float(q_wc[1]), float(q_wc[2]), float(q_wc[3]))
+
+    # Arm is the world origin.
+    arm_t = (0.0, 0.0, 0.0)
+    arm_q = (0.0, 0.0, 0.0, 1.0)
 
     # Table pose: prefer the segmentation-derived T_cam_table when it's in
-    # the calib payload (new schema).  Legacy calibs fall back to placing
-    # the table at the world origin.
+    # the calib payload (new schema).  Transform into the arm-base world frame
+    # via T_world_table = inv(T_cam_arm) @ T_cam_table.
+    # When T_cam_table is None the table pose is unknown; it defaults to the
+    # arm-base origin (a known-poor placeholder — the table will intersect the
+    # arm base).  Real scenes should always carry a calibrated T_cam_table.
     table_t = (0.0, 0.0, 0.0)
     table_q = (0.0, 0.0, 0.0, 1.0)
     if calib.T_cam_table is not None:
-        T = np.asarray(calib.T_cam_table, dtype=np.float64)
-        R = T[:3, :3]
-        t = T[:3, 3]
-        from isaac_auto_scene.utils.transforms import rotation_matrix_to_quat_xyzw
+        # Build 4x4 homogeneous matrices from numpy directly (no o3d copy-constructor).
+        T_cam_arm = np.eye(4, dtype=np.float64)
+        T_cam_arm[:3, :3] = R
+        T_cam_arm[:3, 3] = t
 
-        q = rotation_matrix_to_quat_xyzw(R)
-        table_t = (float(t[0]), float(t[1]), float(t[2]))
-        table_q = (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
+        T_cam_table = np.asarray(calib.T_cam_table, dtype=np.float64)
+
+        # T_world_table = inv(T_cam_arm) @ T_cam_table
+        T_cam_arm_inv = np.eye(4, dtype=np.float64)
+        T_cam_arm_inv[:3, :3] = R_wc
+        T_cam_arm_inv[:3, 3] = t_wc
+        T_world_table = T_cam_arm_inv @ T_cam_table
+
+        R_tbl = T_world_table[:3, :3]
+        t_tbl = T_world_table[:3, 3]
+        q_tbl = rotation_matrix_to_quat_xyzw(R_tbl)
+        table_t = (float(t_tbl[0]), float(t_tbl[1]), float(t_tbl[2]))
+        table_q = (float(q_tbl[0]), float(q_tbl[1]), float(q_tbl[2]), float(q_tbl[3]))
 
     return SceneSpec(
         camera_position_m=cam_t,
         camera_quat_xyzw=cam_q,
-        arm_position_m=arm_t,  # type: ignore[arg-type]
-        arm_quat_xyzw=arm_q,  # type: ignore[arg-type]
+        arm_position_m=arm_t,
+        arm_quat_xyzw=arm_q,
         arm_joint_angles_rad=dict(calib.joint_angles_at_capture or {}),
         table_size_m=table_size_m,
         table_position_m=table_t,
@@ -238,6 +269,8 @@ def write_usd_stub(spec: SceneSpec, out_path: Path) -> Path:
         f'        prepend references = @{so101_usd}@\n' if so101_usd else ""
     )
 
+    res_w = int(spec.pinhole_cfg.get("width", 640))
+    res_h = int(spec.pinhole_cfg.get("height", 480))
     contents = f"""#usda 1.0
 (
     defaultPrim = "World"
@@ -253,7 +286,7 @@ def Xform "World"
         uniform token[] xformOpOrder = ["xformOp:transform"]
         float focalLength = {spec.pinhole_cfg.get("focal_length", 1.93)}
         float horizontalAperture = {spec.pinhole_cfg.get("horizontal_aperture", 20.955)}
-        int2 resolution = ({int(spec.pinhole_cfg.get("width", 640))}, {int(spec.pinhole_cfg.get("height", 480))})
+        int2 resolution = ({res_w}, {res_h})
     }}
 
     def Xform "SO101" (

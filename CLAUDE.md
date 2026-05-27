@@ -52,6 +52,7 @@ diverged decision recorded here, not in plan).
   and the mandatory 30-frame warm-up (`scene_gen.WARM_UP_FRAMES`).
 - Quality gate: `fitness >= 0.65`, `inlier_rmse <= 5 mm`. Defined in
   `register.QUALITY_GATE`.
+- Render/scene world frame = SO-101 arm base at origin; camera pose = inv(T_cam_arm) with optical (ros) convention passed to `Camera.set_world_poses(..., convention="ros")`; never use `set_world_poses_from_view` (discards calibrated roll).
 
 ## Test fixtures
 - `tests/fixtures/synthetic_pcd.py` — synthetic table + arm proxy PCD.

@@ -703,6 +703,7 @@ def cmd_render(args: argparse.Namespace) -> int:  # pragma: no cover - external 
         "--out", str(args.out),
         "--headless",
         "--enable_cameras",
+        "--camera-convention", str(args.camera_convention),
     ]
     if args.ros2:
         cmd += ["--ros2", "--ros2-frames", str(args.ros2_frames)]
@@ -1642,6 +1643,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=60,
         help="extra sim steps after warm-up so the ROS2 publisher can push "
         "frames out (default 60 = ~1 s @ 60 Hz)",
+    )
+    pr.add_argument(
+        "--camera-convention",
+        choices=["ros", "world", "opengl"],
+        default="ros",
+        help="camera orientation frame convention (default ros = RealSense "
+        "optical). Swap to ros/world/opengl to diagnose a rotated render.",
     )
     pr.add_argument(
         "--show",

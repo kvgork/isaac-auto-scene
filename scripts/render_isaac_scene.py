@@ -2,7 +2,7 @@
 
 Must be invoked with the Isaac Sim environment Python — e.g.::
 
-    /home/koen/workspaces/lerobot-isaac-training/.pixi/envs/sim/bin/python \
+    ~/workspaces/lerobot-isaac-training/.pixi/envs/sim/bin/python \
         scripts/render_isaac_scene.py \
         --calib calib.json --out frame_000.png
 
@@ -18,7 +18,6 @@ imports to work — that's why all heavy imports are inline.
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -67,6 +66,14 @@ def main() -> int:
         help="extra simulation steps after warm-up so the ROS2 publisher has "
         "time to push frames out (default 0 = single-shot render only)",
     )
+    parser.add_argument(
+        "--camera-convention",
+        choices=["ros", "world", "opengl"],
+        default="ros",
+        help="frame convention for the camera orientation passed to "
+        "Camera.set_world_poses. 'ros' = optical (+Z fwd, -Y up), matches the "
+        "RealSense calibration frame. Swap to diagnose a rotated render.",
+    )
 
     # Inject Isaac Lab AppLauncher CLI args
     from isaaclab.app import AppLauncher  # type: ignore
@@ -97,7 +104,6 @@ def main() -> int:
     simulation_app = app_launcher.app  # noqa: F841
 
     # ---- Heavy imports must happen AFTER AppLauncher boots ----
-    import numpy as np  # noqa: E402
     import torch  # noqa: E402
     from PIL import Image  # noqa: E402
 
@@ -145,18 +151,25 @@ def main() -> int:
             flush=True,
         )
 
-    # Pose camera (post-reset so internal indices are populated).
-    # Convention: world frame = camera frame (camera_position_m = origin,
-    # camera_quat_xyzw = identity).  Arm sits at spec.arm_position_m —
-    # which is exactly where the calibration says it is, expressed in the
-    # camera frame.  So we look from origin AT the arm position.
-    cam_position = torch.tensor([[0.0, 0.0, 0.0]], dtype=torch.float32)
-    arm_t = np.array(spec.arm_position_m, dtype=np.float32)
-    target = torch.tensor(
-        [[float(arm_t[0]), float(arm_t[1]), float(arm_t[2])]],
-        dtype=torch.float32,
-    )
-    camera.set_world_poses_from_view(cam_position, target)
+    # Set camera world pose from the calibrated spec (post-reset so internal
+    # indices are populated).
+    #
+    # World frame == SO-101 arm base at origin.  Camera pose is inv(T_cam_arm),
+    # which was computed in build_scene_spec from the calibration.
+    #
+    # spec.camera_quat_xyzw is in XYZW order (our internal convention).
+    # Camera.set_world_poses expects WXYZ order and a convention kwarg that
+    # describes the frame that the quaternion represents.
+    # convention="ros" (default) means the camera's +Z is the optical forward
+    # axis and -Y is the optical up axis — matching the RealSense optical frame
+    # that the calibration uses.  Isaac Lab internally converts from this
+    # convention to its OpenGL stage convention before setting the prim pose.
+    # Override via --camera-convention to diagnose a rotated render.
+    x, y, z, w = spec.camera_quat_xyzw
+    cam_pos = torch.tensor([list(spec.camera_position_m)], dtype=torch.float32)
+    cam_ori = torch.tensor([[w, x, y, z]], dtype=torch.float32)  # wxyz for isaaclab
+    camera.set_world_poses(cam_pos, cam_ori, convention=args.camera_convention)
+    print(f"[render] camera convention: {args.camera_convention}", flush=True)
 
     if args.ros2:
         from isaac_auto_scene.ros2_bridge import (  # noqa: E402

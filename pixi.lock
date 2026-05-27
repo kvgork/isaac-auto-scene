@@ -1236,7 +1236,7 @@ packages:
 - pypi: ./
   name: isaac-auto-scene
   version: 0.1.0
-  sha256: 1749c33d006dfbb44931530939abaaf4b7cc434eb59f05b85b5ffc7e1452e8cf
+  sha256: 59bcfaf55ddc42cdfb53ba193bd013d233d3c8d803c708754074a21085164ab7
   requires_python: '>=3.11,<3.12'
 - pypi: https://files.pythonhosted.org/packages/04/96/92447566d16df59b2a776c0fb82dbc4d9e07cd95062562af01e408583fc4/itsdangerous-2.2.0-py3-none-any.whl
   name: itsdangerous

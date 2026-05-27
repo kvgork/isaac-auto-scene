@@ -9,7 +9,29 @@ description = "Capture a D435 RGB-D frame, segment + register the SO-101 arm poi
 requires-python = ">=3.11,<3.12"
 readme = "README.md"
 license = { text = "MIT" }
-authors = [{ name = "Koen van Gorkom", email = "kvgorkom@smart-robotics.nl" }]
+authors = [{ name = "Koen van Gorkom", email = "gorkom.projects@gmail.com" }]
+keywords = [
+    "isaac-sim",
+    "robotics",
+    "point-cloud",
+    "registration",
+    "realsense",
+    "so-101",
+    "open3d",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering",
+]
+
+[project.urls]
+Homepage = "https://github.com/kvgork/isaac-auto-scene"
+Repository = "https://github.com/kvgork/isaac-auto-scene"
+Issues = "https://github.com/kvgork/isaac-auto-scene/issues"
 
 [project.scripts]
 isaac-auto-scene = "isaac_auto_scene.cli:main"
