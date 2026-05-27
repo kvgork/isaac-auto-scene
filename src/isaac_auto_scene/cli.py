@@ -106,6 +106,23 @@ def _default_manual_calibs_dir() -> Path:
     return _config_dir() / "manual-calibs"
 
 
+def _resolve_init_calib(explicit: str | None, no_auto_seed: bool) -> str | None:
+    """Resolve the seed calibration path for manual-align commands.
+
+    Precedence:
+      1. explicit path (--init-from) always wins when given.
+      2. no_auto_seed flag (--no-auto-seed) returns None (identity).
+      3. default saved calib exists returns its path.
+      4. otherwise returns None (identity, first run).
+    """
+    if explicit:
+        return explicit
+    if no_auto_seed:
+        return None
+    default = _default_calib_path()
+    return str(default) if default.exists() else None
+
+
 def _resolve_bundle_init(args, multi):
     """Pick the bundle solver's starting T.
 
@@ -1177,11 +1194,15 @@ def cmd_manual_align(args: argparse.Namespace) -> int:
         outlier_std_ratio=args.outlier_std,
     )
 
+    seed_path = _resolve_init_calib(
+        getattr(args, "init_from", None),
+        getattr(args, "no_auto_seed", False),
+    )
     T_init = np.eye(4)
-    if args.init_from:
+    if seed_path:
         from isaac_auto_scene.calibrate import load_calibration
 
-        prev = load_calibration(args.init_from)
+        prev = load_calibration(Path(seed_path))
         T_init[:3, 3] = prev.translation_m
         # Build rotation from quat_xyzw (Shepperd).
         x, y, z, w = prev.quat_xyzw
@@ -1192,6 +1213,12 @@ def cmd_manual_align(args: argparse.Namespace) -> int:
                 [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
             ]
         )
+        if seed_path != getattr(args, "init_from", None):
+            print(
+                "[manual-align] no --init-from given; "
+                f"auto-seeding T_init from saved calib {seed_path}",
+                file=sys.stderr,
+            )
 
     T_final = run_manual_align(
         cad.points,
@@ -1244,16 +1271,26 @@ def cmd_manual_align_all(args: argparse.Namespace) -> int:
     # Optional starting T from a prior calib.json (e.g. previous
     # manual-align result).  Applied to EVERY pose's viewer so the user
     # only has to nudge from a sensible starting point.
+    seed_path_all = _resolve_init_calib(
+        getattr(args, "init_from", None),
+        getattr(args, "no_auto_seed", False),
+    )
     T_init_all = np.eye(4)
-    init_from = getattr(args, "init_from", None)
-    if init_from:
-        prev = load_calibration(init_from)
+    if seed_path_all:
+        prev = load_calibration(Path(seed_path_all))
         T_init_all = np.asarray(prev.T_cam_arm, dtype=np.float64)
-        print(
-            f"[manual-align-all] init from {init_from} "
-            f"(T_cam_arm.translation={prev.translation_m})",
-            flush=True,
-        )
+        if seed_path_all != getattr(args, "init_from", None):
+            print(
+                "[manual-align-all] no --init-from given; "
+                f"auto-seeding T_init from saved calib {seed_path_all}",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"[manual-align-all] init from {seed_path_all} "
+                f"(T_cam_arm.translation={prev.translation_m})",
+                flush=True,
+            )
 
     print(
         f"[manual-align-all] {len(ok_poses)} pose(s) to align. "
@@ -1748,8 +1785,15 @@ def build_parser() -> argparse.ArgumentParser:
     pma.add_argument(
         "--init-from",
         default=None,
-        help="optional starting calib.json to seed the alignment "
-        f"(default search: {_default_calib_path()} if it exists)",
+        help="starting calib.json to seed the alignment; if omitted, "
+        f"auto-seeds from the saved calib at {_default_calib_path()} "
+        "when it exists unless --no-auto-seed is set",
+    )
+    pma.add_argument(
+        "--no-auto-seed",
+        action="store_true",
+        default=False,
+        help="start from identity; skip auto-seeding from the saved calib",
     )
     pma.add_argument("--target-n-points", type=int, default=8000)
     pma.add_argument(
@@ -1812,8 +1856,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Seed each pose's manual aligner from this calib.json (e.g. "
         "the result of a prior manual-align or register-multi run) "
-        "instead of starting at identity.  Saves time when consecutive "
-        "alignment sessions only need small per-pose adjustments.",
+        "instead of starting at identity; if omitted, auto-seeds from "
+        f"the saved calib at {_default_calib_path()} when it exists "
+        "unless --no-auto-seed is set.",
+    )
+    pmaa.add_argument(
+        "--no-auto-seed",
+        action="store_true",
+        default=False,
+        help="start from identity; skip auto-seeding from the saved calib",
     )
     pmaa.set_defaults(func=cmd_manual_align_all)
 
